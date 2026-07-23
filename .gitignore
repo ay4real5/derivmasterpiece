@@ -1,0 +1,8 @@
+.env
+config.yaml
+__pycache__/
+*.pyc
+.pytest_cache/
+trade_journal.csv
+.venv/
+venv/

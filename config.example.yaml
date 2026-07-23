@@ -1,0 +1,20 @@
+# Copy to config.yaml and edit. Nothing sensitive belongs in this file —
+# the API token goes in .env instead (see .env.example).
+
+app_id: 1089        # replace with your own from https://api.deriv.com > Manage Applications
+symbol: R_100        # Volatility 100 Index — a common Digits-trading symbol
+stake: 1.00
+currency: USD
+backtest_ticks: 5000  # how many historical ticks `backtest` pulls
+
+strategy:
+  window: 100              # how many recent digits to track
+  threshold: 0.03           # deviation from baseline before a signal fires
+  over_under_barrier: 4      # Over/Under split point (0-9)
+
+risk:
+  max_daily_loss: 20.0       # stop for the session once total loss reaches this
+  max_consecutive_losses: 5   # stop after this many losing trades in a row
+  max_trades: 50               # stop after this many trades regardless of outcome
+
+journal_path: trade_journal.csv
