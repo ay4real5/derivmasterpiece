@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -65,3 +66,134 @@ class DigitFrequencyStrategy(Strategy):
                 f"{self._expected_under_freq:.1%} expected)",
             )
         return None
+
+
+class EvenOddFrequencyStrategy(Strategy):
+    """Same idea as DigitFrequencyStrategy but on the Even/Odd contract pair:
+    watches the fraction of even digits in the last `window` ticks and signals
+    a reversion bet once it drifts more than `threshold` from the 50% baseline.
+    Same honesty caveat as above applies.
+    """
+
+    def __init__(self, window: int = 100, threshold: float = 0.03):
+        self.window = window
+        self.threshold = threshold
+        self.history: deque[int] = deque(maxlen=window)
+
+    def on_tick(self, digit: int) -> Signal | None:
+        self.history.append(digit)
+        if len(self.history) < self.window:
+            return None
+
+        even_freq = sum(1 for d in self.history if d % 2 == 0) / len(self.history)
+        deviation = even_freq - 0.5
+
+        if deviation > self.threshold:
+            return Signal(
+                "DIGITODD", None,
+                f"even digits over-represented ({even_freq:.1%} vs 50.0% expected)",
+            )
+        if deviation < -self.threshold:
+            return Signal(
+                "DIGITEVEN", None,
+                f"even digits under-represented ({even_freq:.1%} vs 50.0% expected)",
+            )
+        return None
+
+
+class StreakReversalStrategy(Strategy):
+    """Bets against a run of `streak_len` consecutive digits landing on the
+    same side of `over_under_barrier`.
+
+    IMPORTANT: this is the gambler's fallacy written as code — a streak on
+    independent draws carries no information about the next draw. Included
+    as a baseline to backtest and compare against, precisely because it's
+    the kind of pattern intuition wrongly trusts; see the module docstring.
+    """
+
+    def __init__(self, streak_len: int = 4, over_under_barrier: int = 4):
+        if not 0 <= over_under_barrier <= 9:
+            raise ValueError("over_under_barrier must be between 0 and 9")
+        self.streak_len = streak_len
+        self.barrier = over_under_barrier
+        self._current_side: str | None = None
+        self._streak = 0
+
+    def on_tick(self, digit: int) -> Signal | None:
+        side = "under" if digit <= self.barrier else "over"
+        if side == self._current_side:
+            self._streak += 1
+        else:
+            self._current_side = side
+            self._streak = 1
+
+        if self._streak >= self.streak_len:
+            self._streak = 0
+            if side == "under":
+                return Signal(
+                    "DIGITOVER", str(self.barrier),
+                    f"{self.streak_len} consecutive 'under' digits — betting reversal",
+                )
+            return Signal(
+                "DIGITUNDER", str(self.barrier),
+                f"{self.streak_len} consecutive 'over' digits — betting reversal",
+            )
+        return None
+
+
+class LowEdgeStrategy(Strategy):
+    """Doesn't try to predict anything — that's the point.
+
+    Bets a fixed high-probability contract (default DIGITOVER 0: wins on
+    digits 1-9, i.e. 90% of the time) on a fixed cadence. Deriv prices
+    high-probability digit contracts with the smallest house margin (~1.9%
+    observed, vs ~4% for the 50/50 contracts and up to ~16.7% for longshots),
+    so this is the slowest possible expected bleed per dollar staked. It
+    still loses on average: it minimizes the house edge, it does not beat it.
+    Included as the honest benchmark every "predictive" strategy above has
+    to justify itself against.
+
+    Run `main.py scan-edge` and point contract_type/barrier at whatever is
+    currently cheapest (e.g. DIGITDIFF if it undercuts DIGITOVER 0).
+    """
+
+    CONTRACT_TYPES = ("DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD", "DIGITMATCH", "DIGITDIFF")
+
+    def __init__(self, every: int = 15, contract_type: str = "DIGITOVER", barrier: str | int | None = "0"):
+        if every < 1:
+            raise ValueError("every must be >= 1")
+        if contract_type not in self.CONTRACT_TYPES:
+            raise ValueError(f"contract_type must be one of {self.CONTRACT_TYPES}")
+        if contract_type in ("DIGITEVEN", "DIGITODD"):
+            barrier = None
+        elif barrier is None or not 0 <= int(barrier) <= 9:
+            raise ValueError("barrier must be a digit 0-9 for this contract_type")
+        self.every = every
+        self.contract_type = contract_type
+        self.barrier = None if barrier is None else str(barrier)
+        self._ticks_seen = 0
+
+    def on_tick(self, digit: int) -> Signal | None:
+        self._ticks_seen += 1
+        if self._ticks_seen % self.every != 0:
+            return None
+        return Signal(
+            self.contract_type, self.barrier,
+            "fixed cheapest-bet cadence (see scan-edge for current margins)",
+        )
+
+
+STRATEGIES: dict[str, type[Strategy]] = {
+    "digit_frequency": DigitFrequencyStrategy,
+    "even_odd_frequency": EvenOddFrequencyStrategy,
+    "streak_reversal": StreakReversalStrategy,
+    "low_edge": LowEdgeStrategy,
+}
+
+
+def build_strategy(name: str, **kwargs: Any) -> Strategy:
+    try:
+        cls = STRATEGIES[name]
+    except KeyError:
+        raise ValueError(f"unknown strategy '{name}' — choices: {sorted(STRATEGIES)}") from None
+    return cls(**kwargs)

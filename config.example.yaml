@@ -1,20 +1,34 @@
 # Copy to config.yaml and edit. Nothing sensitive belongs in this file —
 # the API token goes in .env instead (see .env.example).
 
-app_id: 1089        # replace with your own from https://api.deriv.com > Manage Applications
+# Your app's ID from https://developers.deriv.com/dashboard > Registered apps.
+# Deriv retired the old numeric app_ids (e.g. 1089) along with the Legacy API;
+# current app IDs are alphanumeric strings. Create a "Native apps (PAT)" app.
+app_id: your-app-id-here
 symbol: R_100        # Volatility 100 Index — a common Digits-trading symbol
 stake: 1.00
 currency: USD
 backtest_ticks: 5000  # how many historical ticks `backtest` pulls
 
 strategy:
-  window: 100              # how many recent digits to track
-  threshold: 0.03           # deviation from baseline before a signal fires
-  over_under_barrier: 4      # Over/Under split point (0-9)
+  name: digit_frequency      # digit_frequency | even_odd_frequency | streak_reversal
+  window: 100                 # how many recent digits to track (frequency strategies)
+  threshold: 0.03              # deviation from baseline before a signal fires (frequency strategies)
+  over_under_barrier: 4         # Over/Under split point (digit_frequency, streak_reversal)
+  # streak_reversal also takes streak_len (default 4); even_odd_frequency
+  # only takes window/threshold; low_edge takes every (tick cadence,
+  # default 15), contract_type (default DIGITOVER) and barrier (default 0)
+  # — run scan-edge and point it at whatever is currently cheapest.
+  # Unsupported keys for the chosen strategy will raise a TypeError —
+  # remove ones that don't apply.
 
 risk:
   max_daily_loss: 20.0       # stop for the session once total loss reaches this
   max_consecutive_losses: 5   # stop after this many losing trades in a row
   max_trades: 50               # stop after this many trades regardless of outcome
+  # target_profit: 100.0      # optional: stop (happily) once daily PnL reaches this.
+  #                           # Honest note: with negative-EV contracts a profit
+  #                           # target mostly determines *how* you stop, not whether
+  #                           # you profit — see README.
 
 journal_path: trade_journal.csv
