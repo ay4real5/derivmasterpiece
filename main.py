@@ -87,11 +87,12 @@ def cmd_scan_edge(config: dict[str, Any]) -> None:
             "No contracts returned a quote — check that the symbol in config.yaml "
             "is currently tradeable and that your token/account supports it."
         )
-    print(f"{'contract':<12}{'barrier':>8}{'win prob':>10}{'payout':>10}{'ask':>8}{'EV':>9}{'edge %':>9}")
+    print(f"{'contract':<12}{'barrier':>8}{'dur':>5}{'win prob':>10}{'payout':>10}{'ask':>8}{'EV':>9}{'edge %':>9}")
     for r in results:
         barrier = r["barrier"] if r["barrier"] is not None else "-"
+        dur = f"{r.get('duration', 1)}t"
         print(
-            f"{r['contract_type']:<12}{barrier:>8}{r['win_prob']:>10.1%}"
+            f"{r['contract_type']:<12}{barrier:>8}{dur:>5}{r['win_prob']:>10.1%}"
             f"{r['payout']:>10.2f}{r['ask_price']:>8.2f}{r['ev']:>9.3f}{r['edge_pct']:>8.2f}%"
         )
     print(

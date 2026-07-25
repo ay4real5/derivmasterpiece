@@ -19,6 +19,9 @@ strategy:
   # only takes window/threshold; low_edge takes every (tick cadence,
   # default 15), contract_type (default DIGITOVER) and barrier (default 0)
   # — run scan-edge and point it at whatever is currently cheapest.
+  # low_edge contract_type accepts the digit contracts plus CALL/PUT
+  # (Rise/Fall). Measured July 2026: Rise/Fall ~3.8% margin vs 2.17% for
+  # DIGITOVER 0 — Rise/Fall looks like "real trading" but costs ~75% more.
   # Unsupported keys for the chosen strategy will raise a TypeError —
   # remove ones that don't apply.
 

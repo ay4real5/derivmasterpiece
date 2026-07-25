@@ -40,7 +40,8 @@ def last_digit(price: Any, pip_size: int) -> int:
     return int(f"{float(price):.{pip_size}f}"[-1])
 
 
-def _resolves_win(signal: Signal, digit: int) -> bool:
+def _resolves_win(signal: Signal, digit: int,
+                  entry_price: float | None = None, exit_price: float | None = None) -> bool:
     if signal.contract_type == "DIGITOVER":
         return digit > int(signal.barrier)
     if signal.contract_type == "DIGITUNDER":
@@ -53,6 +54,14 @@ def _resolves_win(signal: Signal, digit: int) -> bool:
         return digit == int(signal.barrier)
     if signal.contract_type == "DIGITDIFF":
         return digit != int(signal.barrier)
+    if signal.contract_type in ("CALL", "PUT"):
+        # Rise/Fall resolves on price level, not last digit. An exactly-flat
+        # exit loses for both sides (no "allow equals").
+        if entry_price is None or exit_price is None:
+            raise ValueError("CALL/PUT resolution needs entry and exit prices")
+        if signal.contract_type == "CALL":
+            return exit_price > entry_price
+        return exit_price < entry_price
     raise ValueError(f"unknown contract_type: {signal.contract_type}")
 
 
@@ -80,13 +89,14 @@ def backtest_over_prices(
     on the wrong side of the barrier.
     """
     digits = [last_digit(p, pip_size) for p in prices]
+    floats = [float(p) for p in prices]
     trades: list[dict[str, Any]] = []
     for i in range(len(digits) - 1):
         signal = strategy.on_tick(digits[i])
         if signal is None:
             continue
         next_digit = digits[i + 1]
-        won = _resolves_win(signal, next_digit)
+        won = _resolves_win(signal, next_digit, entry_price=floats[i], exit_price=floats[i + 1])
         profit = approx_net_win(signal, stake) if won else -stake
         trades.append({"digit": next_digit, "signal": signal, "won": won, "profit": profit})
 

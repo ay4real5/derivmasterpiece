@@ -144,9 +144,17 @@ def test_low_edge_even_odd_drops_barrier():
     assert s.on_tick(3).barrier is None
 
 
+def test_low_edge_call_put_drop_barrier():
+    for contract in ("CALL", "PUT"):
+        s = LowEdgeStrategy(every=1, contract_type=contract, barrier=4)
+        signal = s.on_tick(3)
+        assert signal.contract_type == contract
+        assert signal.barrier is None
+
+
 def test_low_edge_rejects_unknown_contract_and_bad_barrier():
     with pytest.raises(ValueError):
-        LowEdgeStrategy(contract_type="CALL")
+        LowEdgeStrategy(contract_type="MULTUP")
     with pytest.raises(ValueError):
         LowEdgeStrategy(contract_type="DIGITMATCH", barrier=10)
     with pytest.raises(ValueError):

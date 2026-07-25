@@ -53,6 +53,35 @@ def test_match_differ_theoretical_win_prob():
     assert theoretical_win_prob("DIGITDIFF", "5") == 0.9
 
 
+def test_call_put_resolve_on_price_not_digit():
+    from deriv_bot.backtester import _resolves_win
+
+    # price rose 100.10 -> 100.22: CALL wins, PUT loses (digits irrelevant)
+    assert _resolves_win(Signal("CALL", None, "t"), 2, entry_price=100.10, exit_price=100.22) is True
+    assert _resolves_win(Signal("PUT", None, "t"), 2, entry_price=100.10, exit_price=100.22) is False
+    # exactly flat: both lose (no "allow equals")
+    assert _resolves_win(Signal("CALL", None, "t"), 0, entry_price=100.10, exit_price=100.10) is False
+    assert _resolves_win(Signal("PUT", None, "t"), 0, entry_price=100.10, exit_price=100.10) is False
+
+
+def test_call_put_theoretical_win_prob():
+    from deriv_bot.edge import theoretical_win_prob
+
+    assert theoretical_win_prob("CALL", None) == 0.5
+    assert theoretical_win_prob("PUT", None) == 0.5
+
+
+def test_backtest_call_strategy_over_rising_prices():
+    from deriv_bot.strategy import LowEdgeStrategy
+
+    prices = [100.10, 100.20, 100.30, 100.40]  # strictly rising
+    report, trades = backtest_over_prices(
+        prices, stake=1.0, strategy=LowEdgeStrategy(every=1, contract_type="CALL"),
+    )
+    assert report["num_trades"] == 3
+    assert all(t["won"] for t in trades)
+
+
 def test_digitover_zero_loses_when_next_digit_is_zero():
     # 123.20 arrives as float 123.2 — its true last digit is 0, so
     # DIGITOVER 0 must LOSE on it. This is the regression the trailing-zero

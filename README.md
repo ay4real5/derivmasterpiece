@@ -125,6 +125,30 @@ for the registry and each strategy's honesty caveat):
   configurable — run `scan-edge` and point it at whatever is currently
   cheapest. The honest benchmark: the slowest possible expected bleed,
   which every "predictive" strategy above has to beat to justify itself.
+  Supports the digit contracts plus `CALL`/`PUT` (Rise/Fall).
+
+### Measured house margins (R_100, July 2026)
+
+| contract | win prob | house margin |
+|---|---|---|
+| DIGITOVER 0 / DIGITUNDER 9 / DIGITDIFF | 90% | **2.17%** |
+| DIGITOVER 1 / DIGITUNDER 8 | 80% | 2.40% |
+| Even/Odd, Over/Under 4 | 50% | 3.85% |
+| **Rise/Fall (CALL/PUT, 1–10 ticks)** | ~50% | **3.80–3.90%** |
+| DIGITMATCH, Over 8 / Under 1 | 10% | 16.67% |
+
+Rise/Fall is priced like the other 50/50 contracts — it is *not* a cheaper
+seat than the 90% digit contracts, despite looking like "real" trading. Note
+its win probability is a shade under 50% (an exactly flat tick loses for both
+sides), so its true margin is slightly worse than shown.
+
+## Martingale
+
+`tools/martingale_sim.py` simulates double-after-loss staking. On the 50%
+contracts with a $10k bankroll and $10 base stake: **64% of careers bust**,
+median peak balance $13.8k, median final balance $4.9k. The peak is why
+people believe it works; the final is why it doesn't. The live bot has no
+stake-progression path by design.
 
 ### Why digits-only, on purpose
 

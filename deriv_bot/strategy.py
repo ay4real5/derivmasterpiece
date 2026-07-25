@@ -157,14 +157,16 @@ class LowEdgeStrategy(Strategy):
     currently cheapest (e.g. DIGITDIFF if it undercuts DIGITOVER 0).
     """
 
-    CONTRACT_TYPES = ("DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD", "DIGITMATCH", "DIGITDIFF")
+    CONTRACT_TYPES = ("DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD",
+                      "DIGITMATCH", "DIGITDIFF", "CALL", "PUT")
+    _NO_BARRIER = ("DIGITEVEN", "DIGITODD", "CALL", "PUT")
 
     def __init__(self, every: int = 15, contract_type: str = "DIGITOVER", barrier: str | int | None = "0"):
         if every < 1:
             raise ValueError("every must be >= 1")
         if contract_type not in self.CONTRACT_TYPES:
             raise ValueError(f"contract_type must be one of {self.CONTRACT_TYPES}")
-        if contract_type in ("DIGITEVEN", "DIGITODD"):
+        if contract_type in self._NO_BARRIER:
             barrier = None
         elif barrier is None or not 0 <= int(barrier) <= 9:
             raise ValueError("barrier must be a digit 0-9 for this contract_type")

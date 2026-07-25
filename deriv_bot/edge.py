@@ -29,6 +29,12 @@ def theoretical_win_prob(contract_type: str, barrier: str | None) -> float:
         return 0.1
     if contract_type == "DIGITDIFF":
         return 0.9
+    if contract_type in ("CALL", "PUT"):
+        # Rise/Fall on a symmetric random walk: ~50% each. Approximate — an
+        # exactly-flat tie loses for both sides, so true prob is a shade
+        # under 0.5, meaning the edge shown for CALL/PUT is a slight
+        # UNDERestimate. Good enough to rank against digit contracts.
+        return 0.5
     b = int(barrier)  # type: ignore[arg-type]
     if contract_type == "DIGITOVER":
         return (9 - b) / 10
@@ -37,13 +43,17 @@ def theoretical_win_prob(contract_type: str, barrier: str | None) -> float:
     raise ValueError(f"unknown contract_type: {contract_type}")
 
 
-def _requests() -> list[tuple[str, str | None]]:
-    reqs: list[tuple[str, str | None]] = [("DIGITEVEN", None), ("DIGITODD", None)]
-    reqs += [("DIGITOVER", str(b)) for b in range(0, 9)]   # barrier 9 can never win
-    reqs += [("DIGITUNDER", str(b)) for b in range(1, 10)]  # barrier 0 can never win
+def _requests() -> list[tuple[str, str | None, int]]:
+    """(contract_type, barrier, duration_ticks) for every quote to request."""
+    reqs: list[tuple[str, str | None, int]] = [("DIGITEVEN", None, 1), ("DIGITODD", None, 1)]
+    reqs += [("DIGITOVER", str(b), 1) for b in range(0, 9)]   # barrier 9 can never win
+    reqs += [("DIGITUNDER", str(b), 1) for b in range(1, 10)]  # barrier 0 can never win
     # all 10 barriers for match/differ: also verifies Deriv prices them uniformly
-    reqs += [("DIGITMATCH", str(b)) for b in range(0, 10)]
-    reqs += [("DIGITDIFF", str(b)) for b in range(0, 10)]
+    reqs += [("DIGITMATCH", str(b), 1) for b in range(0, 10)]
+    reqs += [("DIGITDIFF", str(b), 1) for b in range(0, 10)]
+    # Rise/Fall at a few durations — pricing may differ by duration
+    reqs += [("CALL", None, d) for d in (1, 5, 10)]
+    reqs += [("PUT", None, d) for d in (1, 5, 10)]
     return reqs
 
 
@@ -62,19 +72,19 @@ async def scan_edge(
     await api.connect(ws_url)
     results: list[dict[str, Any]] = []
     try:
-        for contract_type, barrier in _requests():
+        for contract_type, barrier, duration in _requests():
             # the current API renamed `symbol` -> `underlying_symbol` in
             # proposal requests (tick subscriptions still use `ticks: <sym>`)
             params: dict[str, Any] = dict(
                 contract_type=contract_type, underlying_symbol=symbol, amount=stake,
-                basis="stake", duration=1, duration_unit="t", currency=currency,
+                basis="stake", duration=duration, duration_unit="t", currency=currency,
             )
             if barrier is not None:
                 params["barrier"] = barrier
             try:
                 resp = await api.proposal(**params)
             except Exception:
-                continue  # e.g. contract/barrier not offered on this symbol right now
+                continue  # e.g. contract/barrier/duration not offered right now
 
             details = resp["proposal"]
             payout = float(details["payout"])
@@ -84,6 +94,7 @@ async def scan_edge(
             results.append({
                 "contract_type": contract_type,
                 "barrier": barrier,
+                "duration": duration,
                 "win_prob": win_prob,
                 "payout": payout,
                 "ask_price": ask_price,
