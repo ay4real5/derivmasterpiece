@@ -16,6 +16,8 @@ class requires a `max_total_loss` and refuses to size a bet beyond it.
 """
 from __future__ import annotations
 
+from .strategy import LowEdgeStrategy, Signal
+
 
 class Staker:
     def stake_for(self, base_stake: float, net_multiplier: float, budget_left: float) -> float:
@@ -23,6 +25,12 @@ class Staker:
 
     def record(self, profit: float) -> None:
         raise NotImplementedError
+
+    def override_signal(self, signal: Signal) -> Signal | None:
+        """Return a replacement Signal if the staker wants a different
+        contract than the strategy picked, or None to leave it alone.
+        Default: never override."""
+        return None
 
 
 class FlatStake(Staker):
@@ -88,9 +96,66 @@ class RecoveryMartingale(Staker):
             self.cycle_loss = 0.0
 
 
+class SmartRecoveryMartingale(RecoveryMartingale):
+    """`RecoveryMartingale`, but while a losing cycle is open it REPLACES
+    the strategy's contract choice with one of `recovery_contracts`
+    (default: the ~50%-tier contracts) instead of whatever the strategy's
+    own rotation happened to land on.
+
+    Why: recovering a loss on a 90%-tier contract costs roughly 11x the
+    loss (it only pays 8.7%); recovering the same loss on a ~50%-tier
+    contract (paying ~92%) costs barely more than the loss itself. This was
+    found by inspecting a real session's stakes: every stake over $73 had
+    landed on DIGITOVER/DIGITUNDER, purely because that's what the
+    strategy's rotation happened to serve up next — not because it was a
+    good contract to recover on.
+
+    Measured (20k sessions, +600/-1000, $35 base, 20x cap): blind rotation
+    hits the target 46.3% of the time (mean -253); routing recovery to the
+    50%-tier contracts hits 53.6% (mean -135). Same worst-case tail either
+    way (the cap still caps at the same ceiling) — this improves the
+    average outcome and the odds, not the sign of the expectation. Fresh
+    bets (no open losing cycle) are untouched, so contract variety away
+    from recovery is unaffected.
+    """
+
+    name = "smart-recovery-martingale"
+
+    def __init__(self, max_stake: float | None = None, recovery_fraction: float = 1.0,
+                 max_stake_multiple: float | None = None,
+                 recovery_contracts: list[str] | None = None):
+        super().__init__(max_stake, recovery_fraction, max_stake_multiple)
+        specs = recovery_contracts or ["DIGITEVEN", "DIGITODD", "CALL", "PUT"]
+        self.recovery_legs: list[tuple[str, str | None]] = []
+        for spec in specs:
+            kind, _, barrier = str(spec).partition(":")
+            kind = kind.strip().upper()
+            if kind not in LowEdgeStrategy.CONTRACT_TYPES:
+                raise ValueError(f"unknown contract_type {kind!r}")
+            if kind in LowEdgeStrategy._NO_BARRIER:
+                self.recovery_legs.append((kind, None))
+            else:
+                if barrier == "" or not 0 <= int(barrier) <= 9:
+                    raise ValueError(f"{kind} needs a barrier 0-9, e.g. {kind}:0")
+                self.recovery_legs.append((kind, str(int(barrier))))
+        self._toggle = 0
+
+    def override_signal(self, signal: Signal) -> Signal | None:
+        if self.cycle_loss <= 0:
+            return None  # fresh bet: leave the strategy's choice alone
+        kind, barrier = self.recovery_legs[self._toggle % len(self.recovery_legs)]
+        self._toggle += 1
+        return Signal(
+            kind, barrier,
+            f"smart-recovery: switched to {kind}{'' if barrier is None else ':' + barrier} "
+            f"to recover ${self.cycle_loss:.2f} cheaply (was {signal.contract_type})",
+        )
+
+
 STAKERS: dict[str, type[Staker]] = {
     "flat": FlatStake,
     "martingale": RecoveryMartingale,
+    "smart_recovery": SmartRecoveryMartingale,
 }
 
 

@@ -196,6 +196,13 @@ async def _run_live(config: dict[str, Any], dry_run: bool) -> None:
             if signal is None:
                 continue
 
+            # A staker may swap the contract (e.g. smart_recovery routes
+            # recovery bets to whichever contract is cheapest to recover on).
+            override = staker.override_signal(signal)
+            if override is not None:
+                print(override.reason)
+                signal = override
+
             # Size this bet. `net_mult` is what a win pays per 1.0 staked —
             # progressive staking needs it to know how much recovers a run.
             net_mult = approx_net_win(signal, 1.0)

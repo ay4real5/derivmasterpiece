@@ -159,13 +159,31 @@ seat than the 90% digit contracts, despite looking like "real" trading. Note
 its win probability is a shade under 50% (an exactly flat tick loses for both
 sides), so its true margin is slightly worse than shown.
 
-## Martingale
+## Staking (`deriv_bot/staking.py`)
 
-`tools/martingale_sim.py` simulates double-after-loss staking. On the 50%
-contracts with a $10k bankroll and $10 base stake: **64% of careers bust**,
-median peak balance $13.8k, median final balance $4.9k. The peak is why
-people believe it works; the final is why it doesn't. The live bot has no
-stake-progression path by design.
+Set `staking.name` in `config.yaml`. **`flat` is the default and the only
+one usable on a real account** — `main.py` refuses non-flat staking whenever
+`DEMO_MODE=false`.
+
+- `flat` — always the configured `stake`. No progression, ever.
+- `martingale` — recovers a losing cycle's losses (`recovery_fraction`,
+  default 1.0 = all of it) on the next win, capped at `max_stake_multiple`x
+  the base stake so one run can't demand the whole session budget.
+  `tools/martingale_sim.py` simulates unbounded double-after-loss staking:
+  on 50%-tier contracts with a $10k bankroll and $10 base stake, **64% of
+  careers bust**, median peak $13.8k, median final $4.9k. The peak is why
+  people believe it works; the final is why it doesn't.
+- `smart_recovery` — `martingale`, but while a losing cycle is open it
+  swaps the strategy's contract choice for one of `recovery_contracts`
+  (default the ~50%-tier ones) instead of whatever the strategy's rotation
+  served up. Found by inspecting a real session: every stake over $73 had
+  landed on DIGITOVER/DIGITUNDER purely by rotation luck, and that contract
+  only pays 8.7% — recovering there costs ~11x the loss, vs ~1x on a
+  50%-tier contract. Measured (20k sessions, +600/-1000, $35 base, 20x cap):
+  blind rotation hits the target 46.3% of the time (mean −$253); routing
+  recovery to the cheap contracts hits 53.6% (mean −$135). Same worst-case
+  tail either way — this improves the odds and the average, not the sign of
+  the expectation.
 
 ### Why digits-only, on purpose
 

@@ -1,6 +1,7 @@
 import pytest
 
-from deriv_bot.staking import FlatStake, RecoveryMartingale, build_staker
+from deriv_bot.staking import FlatStake, RecoveryMartingale, SmartRecoveryMartingale, build_staker
+from deriv_bot.strategy import Signal
 
 
 def test_flat_always_base_stake():
@@ -78,3 +79,53 @@ def test_martingale_explodes_on_high_prob_contracts():
 def test_build_staker_rejects_unknown():
     with pytest.raises(ValueError):
         build_staker("kelly-on-vibes")
+
+
+def test_base_staker_never_overrides():
+    assert RecoveryMartingale().override_signal(Signal("DIGITOVER", "0", "x")) is None
+    assert FlatStake().override_signal(Signal("DIGITOVER", "0", "x")) is None
+
+
+def test_smart_recovery_leaves_fresh_bets_alone():
+    s = SmartRecoveryMartingale()
+    signal = Signal("DIGITOVER", "0", "quota pick")
+    assert s.override_signal(signal) is None  # cycle_loss is 0 -> no override
+
+
+def test_smart_recovery_switches_contract_during_a_losing_cycle():
+    s = SmartRecoveryMartingale(recovery_contracts=["DIGITEVEN", "DIGITODD"])
+    s.record(-35.0)
+    override = s.override_signal(Signal("DIGITOVER", "0", "quota pick"))
+    assert override is not None
+    assert override.contract_type in ("DIGITEVEN", "DIGITODD")
+    assert override.barrier is None
+
+
+def test_smart_recovery_cycles_through_recovery_legs():
+    s = SmartRecoveryMartingale(recovery_contracts=["DIGITEVEN", "DIGITODD"])
+    s.record(-35.0)
+    sig = Signal("DIGITOVER", "0", "quota pick")
+    first = s.override_signal(sig).contract_type
+    second = s.override_signal(sig).contract_type
+    third = s.override_signal(sig).contract_type
+    assert [first, second, third] == ["DIGITEVEN", "DIGITODD", "DIGITEVEN"]
+
+
+def test_smart_recovery_still_sizes_by_the_overridden_contracts_net():
+    # sanity check on the real motivating scenario: recovering a $35 loss
+    # on a 50%-tier contract (net 0.923) is far cheaper than on a 90%-tier
+    # one (net 0.087)
+    s = SmartRecoveryMartingale()
+    s.record(-35.0)
+    cheap_stake = s.stake_for(35.0, 0.923, budget_left=10_000)
+    expensive_stake = s.stake_for(35.0, 0.087, budget_left=10_000)
+    assert cheap_stake < expensive_stake / 5
+
+
+def test_smart_recovery_rejects_bad_contract_spec():
+    with pytest.raises(ValueError):
+        SmartRecoveryMartingale(recovery_contracts=["NOTREAL"])
+    with pytest.raises(ValueError):
+        SmartRecoveryMartingale(recovery_contracts=["DIGITOVER"])  # needs a barrier
+    with pytest.raises(ValueError):
+        SmartRecoveryMartingale(recovery_contracts=["DIGITOVER:99"])
