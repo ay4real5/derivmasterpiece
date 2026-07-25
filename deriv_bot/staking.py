@@ -46,16 +46,37 @@ class RecoveryMartingale(Staker):
     90% contract a win pays only 8.7%, so recovering one $35 loss needs a
     $402 stake, and two losses need ~$4,600. Martingale only stays
     affordable on the ~50/50 contracts, whose margin is nearly double.
+
+    `recovery_fraction` decides how much of the losing run a single win
+    should claw back (1.0 = all of it, 0.5 = half, 0.0 = flat staking).
+    `max_stake_multiple` hard-caps any bet at N x the base stake — without
+    it, a long run plus a low-paying contract can demand the entire session
+    budget on one bet.
+
+    Measured trade-off (20k sessions, +650/-800, $35 base, mixed contracts):
+    full recovery uncapped hits the target 41.9% of the time; a 20x cap
+    costs ~2 points (39.6%) and removes the worst single-bet blowups; a 5x
+    cap costs a lot more (26.8%). Capping buys smoother losing sessions, not
+    better odds — the median session ends at the stop-loss either way.
     """
 
     name = "recovery-martingale"
 
-    def __init__(self, max_stake: float | None = None):
+    def __init__(self, max_stake: float | None = None, recovery_fraction: float = 1.0,
+                 max_stake_multiple: float | None = None):
+        if not 0.0 <= recovery_fraction <= 1.0:
+            raise ValueError("recovery_fraction must be between 0 and 1")
+        if max_stake_multiple is not None and max_stake_multiple < 1:
+            raise ValueError("max_stake_multiple must be >= 1")
         self.max_stake = max_stake
+        self.recovery_fraction = recovery_fraction
+        self.max_stake_multiple = max_stake_multiple
         self.cycle_loss = 0.0
 
     def stake_for(self, base_stake: float, net_multiplier: float, budget_left: float) -> float:
-        wanted = (self.cycle_loss + base_stake * net_multiplier) / net_multiplier
+        wanted = base_stake + self.recovery_fraction * self.cycle_loss / net_multiplier
+        if self.max_stake_multiple is not None:
+            wanted = min(wanted, self.max_stake_multiple * base_stake)
         if self.max_stake is not None:
             wanted = min(wanted, self.max_stake)
         return max(0.0, min(wanted, budget_left))

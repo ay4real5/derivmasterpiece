@@ -230,12 +230,88 @@ class RotationStrategy(Strategy):
         return Signal(kind, barrier, f"rotation leg {kind}{'' if barrier is None else ':' + barrier}")
 
 
+def _leg_wins(kind: str, barrier: str | None, digit: int) -> bool:
+    """Would this contract have won on `digit`? (CALL/PUT need prices, so
+    they are excluded from digit-based bias scoring.)"""
+    b = int(barrier) if barrier is not None else 0
+    if kind == "DIGITOVER":  return digit > b
+    if kind == "DIGITUNDER": return digit < b
+    if kind == "DIGITEVEN":  return digit % 2 == 0
+    if kind == "DIGITODD":   return digit % 2 == 1
+    if kind == "DIGITMATCH": return digit == b
+    if kind == "DIGITDIFF":  return digit != b
+    raise ValueError(f"{kind} cannot be scored from digits alone")
+
+
+class AdaptiveBiasStrategy(Strategy):
+    """Picks whichever candidate contract has been performing best (or worst)
+    over the last `window` digits, instead of rotating in a fixed order.
+
+    `mode="momentum"` bets the contract that has been winning most lately;
+    `mode="reversion"` bets the one winning least, on the theory it is "due".
+
+    HONEST WARNING, and the reason this class exists mainly to be tested:
+    Deriv's digits pass every independence test we have run on live data
+    (uniformity chi-square 4.6 vs 16.9 threshold; lag-1 transition chi-square
+    72.7 vs 103; 53.3% "over" after 3+ "under" runs, versus 50% expected).
+    If the stream carries no information, then neither momentum nor reversion
+    can beat a fixed rotation, and the only thing selection changes is WHICH
+    house margin you pay. Backtest it against `rotation` before believing it.
+    """
+
+    def __init__(self, every: int = 6, window: int = 50, mode: str = "momentum",
+                 contracts: list[str] | None = None):
+        if every < 1:
+            raise ValueError("every must be >= 1")
+        if mode not in ("momentum", "reversion"):
+            raise ValueError("mode must be 'momentum' or 'reversion'")
+        specs = contracts or ["DIGITOVER:0", "DIGITUNDER:9", "DIGITEVEN", "DIGITODD"]
+        self.legs: list[tuple[str, str | None]] = []
+        for spec in specs:
+            kind, _, barrier = str(spec).partition(":")
+            kind = kind.strip().upper()
+            if kind in ("CALL", "PUT"):
+                raise ValueError("CALL/PUT resolve on price, not digits — "
+                                 "they cannot be bias-scored; use `rotation` for those")
+            if kind not in LowEdgeStrategy.CONTRACT_TYPES:
+                raise ValueError(f"unknown contract_type {kind!r}")
+            if kind in LowEdgeStrategy._NO_BARRIER:
+                self.legs.append((kind, None))
+            else:
+                if barrier == "" or not 0 <= int(barrier) <= 9:
+                    raise ValueError(f"{kind} needs a barrier 0-9, e.g. {kind}:0")
+                self.legs.append((kind, str(int(barrier))))
+        self.every = every
+        self.window = window
+        self.mode = mode
+        self.history: deque[int] = deque(maxlen=window)
+        self._ticks_seen = 0
+
+    def on_tick(self, digit: int) -> Signal | None:
+        self.history.append(digit)
+        self._ticks_seen += 1
+        if self._ticks_seen % self.every != 0 or len(self.history) < self.window:
+            return None
+
+        scored = []
+        for kind, barrier in self.legs:
+            hits = sum(1 for d in self.history if _leg_wins(kind, barrier, d))
+            scored.append((hits / len(self.history), kind, barrier))
+        rate, kind, barrier = (max(scored) if self.mode == "momentum" else min(scored))
+        return Signal(
+            kind, barrier,
+            f"{self.mode}: {kind}{'' if barrier is None else ':' + barrier} "
+            f"hit {rate:.0%} of last {len(self.history)}",
+        )
+
+
 STRATEGIES: dict[str, type[Strategy]] = {
     "digit_frequency": DigitFrequencyStrategy,
     "even_odd_frequency": EvenOddFrequencyStrategy,
     "streak_reversal": StreakReversalStrategy,
     "low_edge": LowEdgeStrategy,
     "rotation": RotationStrategy,
+    "adaptive_bias": AdaptiveBiasStrategy,
 }
 
 

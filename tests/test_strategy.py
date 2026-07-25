@@ -116,7 +116,7 @@ def test_build_strategy_rejects_unknown_name():
 def test_registry_contains_all_strategies():
     assert set(STRATEGIES) == {
         "digit_frequency", "even_odd_frequency", "streak_reversal", "low_edge",
-        "rotation",
+        "rotation", "adaptive_bias",
     }
 
 
