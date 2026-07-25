@@ -14,6 +14,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
+from .edge import theoretical_win_prob
+
 
 @dataclass
 class Signal:
@@ -305,6 +307,123 @@ class AdaptiveBiasStrategy(Strategy):
         )
 
 
+class QuotaRotationStrategy(Strategy):
+    """Fixes the bug found in `AdaptiveBiasStrategy`: raw win-rate scoring
+    always favours whichever contract has the highest theoretical
+    probability, so a 90%-tier contract permanently outscores a 50%-tier
+    one and families like Even/Odd or Rise/Fall never get picked at all —
+    confirmed on live sessions (212 trades, 100% DIGITOVER/DIGITUNDER, 0
+    Even/Odd, 0 Rise/Fall).
+
+    This strategy guarantees every configured family trades its share of
+    bets via a weighted round-robin scheduler (deterministic, not random —
+    50/25/25 shares land close to exactly 50/25/25 over any decent sample).
+    Scoring is only used to pick a leg *within* the family whose turn it
+    is, and only for contracts scoreable from digit history; families with
+    no digit-scoreable legs (Rise/Fall) alternate their legs evenly instead.
+
+    `families`: list of (name, contract_specs, share). Example:
+        [("over_under", ["DIGITOVER:0", "DIGITUNDER:9"], 0.5),
+         ("even_odd",   ["DIGITEVEN", "DIGITODD"],       0.25),
+         ("rise_fall",  ["CALL", "PUT"],                 0.25)]
+
+    Same honesty note as `AdaptiveBiasStrategy` applies: digits carry no
+    detectable bias (see its docstring), so within-family scoring mainly
+    determines which side of a coin-flip-priced pair you take, not whether
+    you win more. The quota's real job is making sure every requested
+    contract family actually appears in the journal.
+    """
+
+    DEFAULT_FAMILIES: list[tuple[str, list[str], float]] = [
+        ("over_under", ["DIGITOVER:0", "DIGITUNDER:9"], 0.5),
+        ("even_odd", ["DIGITEVEN", "DIGITODD"], 0.25),
+        ("rise_fall", ["CALL", "PUT"], 0.25),
+    ]
+
+    def __init__(self, every: int = 6, window: int = 50, mode: str = "momentum",
+                 families: list[tuple[str, list[str], float]] | None = None):
+        if every < 1:
+            raise ValueError("every must be >= 1")
+        if mode not in ("momentum", "reversion"):
+            raise ValueError("mode must be 'momentum' or 'reversion'")
+        if families is None:
+            families = self.DEFAULT_FAMILIES
+        if not families or sum(share for _, _, share in families) <= 0:
+            raise ValueError("families must be non-empty with shares summing > 0")
+
+        self.every = every
+        self.window = window
+        self.mode = mode
+        self.history: deque[int] = deque(maxlen=window)
+        self._ticks_seen = 0
+        self._rf_toggle = 0
+
+        total_share = sum(share for _, _, share in families)
+        self._family_names: list[str] = []
+        self._family_weights: list[float] = []
+        self._family_legs: list[list[tuple[str, str | None]]] = []
+        self._credit: list[float] = []
+        for name, specs, share in families:
+            if share <= 0:
+                raise ValueError(f"family {name!r} needs a positive share")
+            legs: list[tuple[str, str | None]] = []
+            for spec in specs:
+                kind, _, barrier = str(spec).partition(":")
+                kind = kind.strip().upper()
+                if kind not in LowEdgeStrategy.CONTRACT_TYPES:
+                    raise ValueError(f"unknown contract_type {kind!r}")
+                if kind in LowEdgeStrategy._NO_BARRIER:
+                    legs.append((kind, None))
+                else:
+                    if barrier == "" or not 0 <= int(barrier) <= 9:
+                        raise ValueError(f"{kind} needs a barrier 0-9, e.g. {kind}:0")
+                    legs.append((kind, str(int(barrier))))
+            self._family_names.append(name)
+            self._family_weights.append(share / total_share)
+            self._family_legs.append(legs)
+            self._credit.append(0.0)
+
+    def _pick_leg(self, family_idx: int) -> tuple[tuple[str, str | None], float | None]:
+        legs = self._family_legs[family_idx]
+        scoreable = [(k, b) for k, b in legs if k not in ("CALL", "PUT")]
+        if not scoreable:
+            leg = legs[self._rf_toggle % len(legs)]
+            self._rf_toggle += 1
+            return leg, None
+        if len(scoreable) == 1:
+            return scoreable[0], None
+
+        scored = []
+        for kind, barrier in scoreable:
+            hits = sum(1 for d in self.history if _leg_wins(kind, barrier, d))
+            rate = hits / len(self.history) if self.history else 0.0
+            excess = rate - theoretical_win_prob(kind, barrier)
+            scored.append((excess, kind, barrier))
+        excess, kind, barrier = (max(scored) if self.mode == "momentum" else min(scored))
+        return (kind, barrier), excess
+
+    def on_tick(self, digit: int) -> Signal | None:
+        self.history.append(digit)
+        self._ticks_seen += 1
+        if self._ticks_seen % self.every != 0 or len(self.history) < self.window:
+            return None
+
+        # Weighted round-robin: every family accrues credit each turn;
+        # whoever has the most credit trades and pays it down by 1. This
+        # keeps shares proportional AND well-interleaved (not clumped).
+        for i in range(len(self._credit)):
+            self._credit[i] += self._family_weights[i]
+        idx = max(range(len(self._credit)), key=lambda i: self._credit[i])
+        self._credit[idx] -= 1.0
+
+        (kind, barrier), excess = self._pick_leg(idx)
+        fam = self._family_names[idx]
+        reason = f"quota:{fam} -> {kind}{'' if barrier is None else ':' + barrier}"
+        if excess is not None:
+            reason += f" ({self.mode} excess {excess:+.1%})"
+        return Signal(kind, barrier, reason)
+
+
 STRATEGIES: dict[str, type[Strategy]] = {
     "digit_frequency": DigitFrequencyStrategy,
     "even_odd_frequency": EvenOddFrequencyStrategy,
@@ -312,6 +431,7 @@ STRATEGIES: dict[str, type[Strategy]] = {
     "low_edge": LowEdgeStrategy,
     "rotation": RotationStrategy,
     "adaptive_bias": AdaptiveBiasStrategy,
+    "quota_rotation": QuotaRotationStrategy,
 }
 
 

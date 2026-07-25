@@ -126,6 +126,23 @@ for the registry and each strategy's honesty caveat):
   cheapest. The honest benchmark: the slowest possible expected bleed,
   which every "predictive" strategy above has to beat to justify itself.
   Supports the digit contracts plus `CALL`/`PUT` (Rise/Fall).
+- `rotation` — cycles a fixed list of contracts (`contracts: ["DIGITOVER:0",
+  "DIGITEVEN", "CALL"]`) on a tick cadence. A variety/comfort knob, not an
+  edge — mixing blends the margins you pay, it can't change the sign.
+- `adaptive_bias` — scores each candidate contract by raw recent win rate
+  and bets whichever scored highest (`mode: momentum`) or lowest
+  (`reversion`). **Known limitation, kept for the test it demonstrates:**
+  raw win rate always favours the highest-probability contract, so on a
+  mixed list it collapses into always betting the 90%-tier one — verified
+  live (212 trades: 100% DIGITOVER/DIGITUNDER, 0% Even/Odd, 0% Rise/Fall).
+  Use `quota_rotation` if you actually want a mix.
+- `quota_rotation` — the fix for the above. Guarantees each contract
+  *family* trades its configured share via weighted round-robin (e.g. 50%
+  Over/Under, 25% Even/Odd, 25% Rise/Fall — deterministic, not
+  probabilistic), then scores only *within* a family where that's
+  meaningful (Rise/Fall's CALL/PUT just alternate, since they resolve on
+  price rather than digits). Configure via `families: [[name, [contract
+  specs], share], ...]`.
 
 ### Measured house margins (R_100, July 2026)
 

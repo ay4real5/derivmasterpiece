@@ -11,7 +11,9 @@ currency: USD
 backtest_ticks: 5000  # how many historical ticks `backtest` pulls
 
 strategy:
-  name: digit_frequency      # digit_frequency | even_odd_frequency | streak_reversal
+  # digit_frequency | even_odd_frequency | streak_reversal | low_edge |
+  # rotation | adaptive_bias | quota_rotation  (see README "Strategies")
+  name: digit_frequency
   window: 100                 # how many recent digits to track (frequency strategies)
   threshold: 0.03              # deviation from baseline before a signal fires (frequency strategies)
   over_under_barrier: 4         # Over/Under split point (digit_frequency, streak_reversal)
@@ -22,6 +24,20 @@ strategy:
   # low_edge contract_type accepts the digit contracts plus CALL/PUT
   # (Rise/Fall). Measured July 2026: Rise/Fall ~3.8% margin vs 2.17% for
   # DIGITOVER 0 — Rise/Fall looks like "real trading" but costs ~75% more.
+  #
+  # quota_rotation guarantees each contract FAMILY trades its share —
+  # unlike adaptive_bias, which silently only ever bets the highest-
+  # probability contract in its list (a bug we found and kept documented,
+  # not fixed in place, so the failure mode stays visible):
+  #   name: quota_rotation
+  #   every: 6            # tick cadence
+  #   window: 50           # digits of history before scoring kicks in
+  #   mode: momentum        # momentum | reversion, scores legs WITHIN a family
+  #   families:
+  #     - [over_under, ["DIGITOVER:0", "DIGITUNDER:9"], 0.5]
+  #     - [even_odd,   ["DIGITEVEN", "DIGITODD"],       0.25]
+  #     - [rise_fall,  ["CALL", "PUT"],                 0.25]
+  #
   # Unsupported keys for the chosen strategy will raise a TypeError —
   # remove ones that don't apply.
 

@@ -5,6 +5,7 @@ from deriv_bot.strategy import (
     DigitFrequencyStrategy,
     EvenOddFrequencyStrategy,
     LowEdgeStrategy,
+    QuotaRotationStrategy,
     StreakReversalStrategy,
     build_strategy,
 )
@@ -116,7 +117,7 @@ def test_build_strategy_rejects_unknown_name():
 def test_registry_contains_all_strategies():
     assert set(STRATEGIES) == {
         "digit_frequency", "even_odd_frequency", "streak_reversal", "low_edge",
-        "rotation", "adaptive_bias",
+        "rotation", "adaptive_bias", "quota_rotation",
     }
 
 
@@ -189,3 +190,65 @@ def test_low_edge_rejects_unknown_contract_and_bad_barrier():
         LowEdgeStrategy(contract_type="DIGITMATCH", barrier=10)
     with pytest.raises(ValueError):
         LowEdgeStrategy(contract_type="DIGITMATCH", barrier=None)
+
+
+def test_quota_rotation_guarantees_every_family_trades():
+    # single-leg families -> no scoring ambiguity, family is identifiable
+    # directly from the resulting contract_type.
+    families = [
+        ("over_under", ["DIGITOVER:0"], 0.5),
+        ("even_odd", ["DIGITEVEN"], 0.25),
+        ("rise_fall", ["CALL"], 0.25),
+    ]
+    s = QuotaRotationStrategy(every=1, window=1, families=families)
+    seen = []
+    for i in range(20):
+        sig = s.on_tick(i % 10)
+        if sig is not None:
+            seen.append(sig.contract_type)
+    assert set(seen) == {"DIGITOVER", "DIGITEVEN", "CALL"}
+
+
+def test_quota_rotation_shares_are_proportional():
+    families = [
+        ("A", ["DIGITEVEN"], 2.0),
+        ("B", ["DIGITODD"], 1.0),
+    ]
+    s = QuotaRotationStrategy(every=1, window=1, families=families)
+    counts = {"DIGITEVEN": 0, "DIGITODD": 0}
+    for i in range(30):
+        sig = s.on_tick(i % 10)
+        counts[sig.contract_type] += 1
+    # 2:1 share over 30 trades -> exactly 20:10
+    assert counts == {"DIGITEVEN": 20, "DIGITODD": 10}
+
+
+def test_quota_rotation_call_put_alternates_within_family():
+    families = [("rise_fall", ["CALL", "PUT"], 1.0)]
+    s = QuotaRotationStrategy(every=1, window=1, families=families)
+    kinds = [s.on_tick(i % 10).contract_type for i in range(4)]
+    assert kinds == ["CALL", "PUT", "CALL", "PUT"]
+
+
+def test_quota_rotation_scores_within_family_when_scoreable():
+    families = [("over_under", ["DIGITOVER:0", "DIGITUNDER:9"], 1.0)]
+    s = QuotaRotationStrategy(every=1, window=5, mode="momentum", families=families)
+    # feed digits that make DIGITOVER:0 clearly outperform DIGITUNDER:9
+    # within the window (mostly high digits -> OVER wins, UNDER loses)
+    signal = None
+    for d in [9, 9, 9, 9, 9]:
+        signal = s.on_tick(d)
+    assert signal.contract_type == "DIGITOVER"
+
+
+def test_quota_rotation_rejects_bad_config():
+    with pytest.raises(ValueError):
+        QuotaRotationStrategy(families=[])
+    with pytest.raises(ValueError):
+        QuotaRotationStrategy(families=[("a", ["DIGITEVEN"], 0.0)])
+    with pytest.raises(ValueError):
+        QuotaRotationStrategy(mode="astrology")
+    with pytest.raises(ValueError):
+        QuotaRotationStrategy(every=0)
+    with pytest.raises(ValueError):
+        QuotaRotationStrategy(families=[("a", ["NOTREAL"], 1.0)])
