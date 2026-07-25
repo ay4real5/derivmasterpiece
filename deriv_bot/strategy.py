@@ -185,11 +185,57 @@ class LowEdgeStrategy(Strategy):
         )
 
 
+class RotationStrategy(Strategy):
+    """Cycles through a list of contracts on a fixed tick cadence.
+
+    Predicts nothing — it exists to spread a session across contract types.
+    Worth knowing what rotation does and doesn't do: because every contract
+    resolves on the same underlying random tick, mixing cannot improve
+    expected value. It blends the *margins* you pay (e.g. alternating a
+    2.17% contract with 3.85% ones lands you in between) and blends the
+    outcome shapes. It is a comfort/variety knob, not an edge.
+
+    contracts: list of "TYPE" or "TYPE:BARRIER" strings, e.g.
+        ["DIGITOVER:0", "DIGITEVEN", "CALL"]
+    """
+
+    def __init__(self, every: int = 3, contracts: list[str] | None = None):
+        if every < 1:
+            raise ValueError("every must be >= 1")
+        specs = contracts or ["DIGITOVER:0", "DIGITEVEN", "CALL"]
+        self.legs: list[tuple[str, str | None]] = []
+        for spec in specs:
+            kind, _, barrier = str(spec).partition(":")
+            kind = kind.strip().upper()
+            if kind not in LowEdgeStrategy.CONTRACT_TYPES:
+                raise ValueError(f"unknown contract_type {kind!r}")
+            if kind in LowEdgeStrategy._NO_BARRIER:
+                self.legs.append((kind, None))
+            else:
+                if barrier == "":
+                    raise ValueError(f"{kind} needs a barrier, e.g. {kind}:0")
+                if not 0 <= int(barrier) <= 9:
+                    raise ValueError("barrier must be a digit 0-9")
+                self.legs.append((kind, str(int(barrier))))
+        self.every = every
+        self._ticks_seen = 0
+        self._next_leg = 0
+
+    def on_tick(self, digit: int) -> Signal | None:
+        self._ticks_seen += 1
+        if self._ticks_seen % self.every != 0:
+            return None
+        kind, barrier = self.legs[self._next_leg % len(self.legs)]
+        self._next_leg += 1
+        return Signal(kind, barrier, f"rotation leg {kind}{'' if barrier is None else ':' + barrier}")
+
+
 STRATEGIES: dict[str, type[Strategy]] = {
     "digit_frequency": DigitFrequencyStrategy,
     "even_odd_frequency": EvenOddFrequencyStrategy,
     "streak_reversal": StreakReversalStrategy,
     "low_edge": LowEdgeStrategy,
+    "rotation": RotationStrategy,
 }
 
 

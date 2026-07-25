@@ -116,7 +116,37 @@ def test_build_strategy_rejects_unknown_name():
 def test_registry_contains_all_strategies():
     assert set(STRATEGIES) == {
         "digit_frequency", "even_odd_frequency", "streak_reversal", "low_edge",
+        "rotation",
     }
+
+
+def test_rotation_cycles_contracts_on_cadence():
+    from deriv_bot.strategy import RotationStrategy
+
+    s = RotationStrategy(every=2, contracts=["DIGITOVER:0", "DIGITEVEN", "CALL"])
+    assert s.on_tick(1) is None                      # cadence not reached
+    first = s.on_tick(2)
+    assert (first.contract_type, first.barrier) == ("DIGITOVER", "0")
+    s.on_tick(3)
+    second = s.on_tick(4)
+    assert (second.contract_type, second.barrier) == ("DIGITEVEN", None)
+    s.on_tick(5)
+    third = s.on_tick(6)
+    assert (third.contract_type, third.barrier) == ("CALL", None)
+    s.on_tick(7)
+    fourth = s.on_tick(8)
+    assert (fourth.contract_type, fourth.barrier) == ("DIGITOVER", "0")  # wraps
+
+
+def test_rotation_rejects_bad_specs():
+    from deriv_bot.strategy import RotationStrategy
+
+    with pytest.raises(ValueError):
+        RotationStrategy(contracts=["NOTACONTRACT"])
+    with pytest.raises(ValueError):
+        RotationStrategy(contracts=["DIGITOVER"])       # needs a barrier
+    with pytest.raises(ValueError):
+        RotationStrategy(contracts=["DIGITOVER:99"])
 
 
 def test_low_edge_fires_on_cadence_with_fixed_contract():

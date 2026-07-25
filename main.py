@@ -13,11 +13,16 @@ from dotenv import load_dotenv
 
 from deriv_bot.analysis import analyze_journal
 from deriv_bot.api import DerivAPI
-from deriv_bot.backtester import backtest_over_prices, fetch_ticks, last_digit, run_backtest
+from deriv_bot.backtester import (
+    approx_net_win, backtest_over_prices, fetch_ticks, last_digit, run_backtest,
+)
 from deriv_bot.edge import scan_edge
 from deriv_bot.journal import TradeJournal
 from deriv_bot.risk import RiskLimits, RiskManager
+from deriv_bot.staking import build_staker
 from deriv_bot.strategy import STRATEGIES, Strategy, build_strategy
+
+MIN_STAKE = 0.35  # Deriv's minimum contract stake
 
 
 def load_config(path: str) -> dict[str, Any]:
@@ -151,6 +156,16 @@ async def _run_live(config: dict[str, Any], dry_run: bool) -> None:
     risk = RiskManager(RiskLimits(**config["risk"]))
     journal = TradeJournal(config.get("journal_path", "trade_journal.csv"))
 
+    staking_cfg = dict(config.get("staking", {}))
+    staking_name = staking_cfg.pop("name", "flat")
+    if staking_name != "flat" and not demo_mode:
+        sys.exit(
+            f"staking '{staking_name}' is DEMO ONLY and DEMO_MODE is false. "
+            "Progressive staking on a real-money account is refused by design — "
+            "see deriv_bot/staking.py and tools/martingale_sim.py."
+        )
+    staker = build_staker(staking_name, **staking_cfg)
+
     api = DerivAPI(config["app_id"])
     accounts = await api.list_accounts(token)
     wanted_type = "real" if not demo_mode else "demo"
@@ -167,7 +182,7 @@ async def _run_live(config: dict[str, Any], dry_run: bool) -> None:
         print(f"Authorized as {account['account_id']} ({wanted_type.upper()} account)")
 
         symbol = config["symbol"]
-        stake = config["stake"]
+        base_stake = config["stake"]
         currency = account.get("currency", config.get("currency", "USD"))
 
         async for tick_msg in api.subscribe({"ticks": symbol}):
@@ -180,6 +195,15 @@ async def _run_live(config: dict[str, Any], dry_run: bool) -> None:
             signal = strategy.on_tick(digit)
             if signal is None:
                 continue
+
+            # Size this bet. `net_mult` is what a win pays per 1.0 staked —
+            # progressive staking needs it to know how much recovers a run.
+            net_mult = approx_net_win(signal, 1.0)
+            budget_left = abs(risk.limits.max_daily_loss) + risk.daily_pnl
+            stake = round(staker.stake_for(base_stake, net_mult, budget_left), 2)
+            if stake < MIN_STAKE:
+                print(f"Remaining budget ${budget_left:.2f} below minimum stake — stopping.")
+                break
 
             proposal_params: dict[str, Any] = dict(
                 contract_type=signal.contract_type,
@@ -221,6 +245,7 @@ async def _run_live(config: dict[str, Any], dry_run: bool) -> None:
             print(f"Settled contract_id={contract_id} profit={profit:.2f} balance={balance_after:.2f}")
 
             risk.record_trade(profit)
+            staker.record(profit)
             journal.record(
                 symbol=symbol, contract_type=signal.contract_type,
                 barrier=signal.barrier, stake=ask_price, payout=payout,
