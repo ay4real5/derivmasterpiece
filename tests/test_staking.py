@@ -1,6 +1,12 @@
 import pytest
 
-from deriv_bot.staking import FlatStake, RecoveryMartingale, SmartRecoveryMartingale, build_staker
+from deriv_bot.staking import (
+    DoublingMartingale,
+    FlatStake,
+    RecoveryMartingale,
+    SmartRecoveryMartingale,
+    build_staker,
+)
 from deriv_bot.strategy import Signal
 
 
@@ -129,3 +135,54 @@ def test_smart_recovery_rejects_bad_contract_spec():
         SmartRecoveryMartingale(recovery_contracts=["DIGITOVER"])  # needs a barrier
     with pytest.raises(ValueError):
         SmartRecoveryMartingale(recovery_contracts=["DIGITOVER:99"])
+
+
+def test_doubling_produces_the_classic_sequence():
+    s = DoublingMartingale()
+    base = 10.0
+    stakes = []
+    for _ in range(6):
+        stakes.append(s.stake_for(base, 0.923, budget_left=10_000))
+        s.record(-1.0)  # any loss
+    assert stakes == [10.0, 20.0, 40.0, 80.0, 160.0, 320.0]
+
+
+def test_doubling_resets_on_win():
+    s = DoublingMartingale()
+    s.record(-1.0)
+    s.record(-1.0)
+    assert s.stake_for(10.0, 0.923, 10_000) == 40.0
+    s.record(1.0)
+    assert s.stake_for(10.0, 0.923, 10_000) == 10.0
+
+
+def test_doubling_capped_by_max_stake_multiple():
+    s = DoublingMartingale(max_stake_multiple=32)
+    for _ in range(10):
+        s.record(-1.0)
+    assert s.stake_for(10.0, 0.923, budget_left=100_000) == 320.0  # 32 x 10
+
+
+def test_doubling_capped_by_budget():
+    s = DoublingMartingale()
+    for _ in range(3):
+        s.record(-1.0)
+    assert s.stake_for(10.0, 0.923, budget_left=50.0) == 50.0
+
+
+def test_doubling_never_overrides_contract():
+    s = DoublingMartingale()
+    s.record(-1.0)
+    assert s.override_signal(Signal("DIGITOVER", "0", "quota pick")) is None
+
+
+def test_doubling_rejects_bad_parameters():
+    with pytest.raises(ValueError):
+        DoublingMartingale(multiplier=1.0)
+    with pytest.raises(ValueError):
+        DoublingMartingale(max_stake_multiple=0.5)
+
+
+def test_build_staker_doubling():
+    s = build_staker("doubling", multiplier=2.0)
+    assert isinstance(s, DoublingMartingale)

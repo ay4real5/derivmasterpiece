@@ -152,10 +152,61 @@ class SmartRecoveryMartingale(RecoveryMartingale):
         )
 
 
+class DoublingMartingale(Staker):
+    """The textbook doubling sequence: stake = base * multiplier**streak,
+    where streak is the number of consecutive losses. Default multiplier=2
+    gives base=10 -> 10, 20, 40, 80, 160, 320, ... Resets to base on a win.
+
+    This is deliberately DIFFERENT from `RecoveryMartingale`: it doubles a
+    fixed amount regardless of which contract the strategy happens to bet,
+    rather than computing the exact stake needed to recover the loss on
+    THAT contract's real payout. Two honest consequences:
+
+    1. On a contract paying close to 2x (near-50% win probability), pure
+       doubling comes close to recovering a losing streak in full on the
+       next win — but real payouts here are ~1.92x, not exactly 2x, so
+       every recovered cycle still leaves a small residual loss (roughly
+       the house margin's worth) rather than a full recovery.
+    2. On a mixed rotation, a loss taken on one contract (say a 90%-tier
+       one, paying only 8.7%) and "recovered" with a doubled stake on a
+       different contract next time will over- or under-shoot the true
+       recovery amount — the doubling sequence doesn't know or care what
+       actually needs recovering in dollar terms, only how many losses in
+       a row there have been.
+
+    `max_stake_multiple` hard-caps the sequence (e.g. 32 stops the climb
+    at the 6th step of a 2x sequence: 10,20,40,80,160,320, then flat).
+    """
+
+    name = "doubling-martingale"
+
+    def __init__(self, multiplier: float = 2.0, max_stake_multiple: float | None = None):
+        if multiplier <= 1.0:
+            raise ValueError("multiplier must be > 1")
+        if max_stake_multiple is not None and max_stake_multiple < 1:
+            raise ValueError("max_stake_multiple must be >= 1")
+        self.multiplier = multiplier
+        self.max_stake_multiple = max_stake_multiple
+        self.consecutive_losses = 0
+
+    def stake_for(self, base_stake: float, net_multiplier: float, budget_left: float) -> float:
+        wanted = base_stake * (self.multiplier ** self.consecutive_losses)
+        if self.max_stake_multiple is not None:
+            wanted = min(wanted, self.max_stake_multiple * base_stake)
+        return max(0.0, min(wanted, budget_left))
+
+    def record(self, profit: float) -> None:
+        if profit < 0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
+
+
 STAKERS: dict[str, type[Staker]] = {
     "flat": FlatStake,
     "martingale": RecoveryMartingale,
     "smart_recovery": SmartRecoveryMartingale,
+    "doubling": DoublingMartingale,
 }
 
 
