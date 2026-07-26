@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from deriv_bot.multi_scan import DEFAULT_CANDIDATES, parse_candidate_specs, scan_best
+from deriv_bot.multi_scan import DEFAULT_CANDIDATES, DEFAULT_SYMBOLS, parse_candidate_specs, scan_best
 
 
 class _FakeAPI:
@@ -86,6 +86,16 @@ def test_parse_candidate_specs_rejects_bad_input():
         parse_candidate_specs(["DIGITOVER:99"])
 
 
-def test_default_candidates_cover_all_families():
+def test_default_candidates_cover_the_three_requested_categories():
     kinds = {k for k, _ in DEFAULT_CANDIDATES}
-    assert kinds == {"DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD", "DIGITDIFF", "CALL", "PUT"}
+    assert kinds == {"DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD", "CALL", "PUT"}
+    # explicitly barrier 3, not the cheapest-possible barrier
+    assert ("DIGITOVER", "3") in DEFAULT_CANDIDATES
+    assert ("DIGITUNDER", "3") in DEFAULT_CANDIDATES
+
+
+def test_default_symbols_cover_both_volatility_families():
+    assert set(DEFAULT_SYMBOLS) == {
+        "R_10", "R_25", "R_50", "R_75", "R_100",
+        "1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V",
+    }

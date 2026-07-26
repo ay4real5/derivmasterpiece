@@ -20,15 +20,22 @@ from typing import Any
 from .edge import theoretical_win_prob
 from .strategy import LowEdgeStrategy
 
-DEFAULT_SYMBOLS = ["R_10", "R_25", "R_50", "R_75", "R_100"]
+# Both volatility index families: the classic ~2s-tick indices and their
+# 1-second-tick counterparts. Verified live that both families' symbols
+# resolve (2026-07): R_10/25/50/75/100 and 1HZ10V/25V/50V/75V/100V.
+DEFAULT_SYMBOLS = [
+    "R_10", "R_25", "R_50", "R_75", "R_100",
+    "1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V",
+]
 
-# One representative candidate per contract "family" so a scan stays fast —
-# not every barrier, just enough to cover Over/Under, Even/Odd, Matches/
-# Differs, and Rise/Fall. Each is priced independently per symbol.
+# Exactly three contract categories to interchange between: Over/Under at
+# barrier 3 (not the cheapest-possible barrier — a deliberate choice to
+# compare a real mid-tier bet, not just default to the safest one), Even/
+# Odd, and Rise/Fall. The scanner still picks whichever is cheapest per
+# symbol per cycle; nothing here is a recommendation, just the menu.
 DEFAULT_CANDIDATES: list[tuple[str, str | None]] = [
-    ("DIGITOVER", "0"), ("DIGITUNDER", "9"),
+    ("DIGITOVER", "3"), ("DIGITUNDER", "3"),
     ("DIGITEVEN", None), ("DIGITODD", None),
-    ("DIGITDIFF", "5"),
     ("CALL", None), ("PUT", None),
 ]
 
