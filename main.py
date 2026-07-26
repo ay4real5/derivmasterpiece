@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 from typing import Any
 
 import yaml
@@ -18,6 +19,7 @@ from deriv_bot.backtester import (
 )
 from deriv_bot.edge import scan_edge
 from deriv_bot.journal import TradeJournal
+from deriv_bot.multi_scan import DEFAULT_CANDIDATES, DEFAULT_SYMBOLS, parse_candidate_specs, scan_best
 from deriv_bot.risk import RiskLimits, RiskManager
 from deriv_bot.staking import build_staker
 from deriv_bot.strategy import STRATEGIES, Strategy, build_strategy
@@ -267,6 +269,145 @@ def cmd_live(config: dict[str, Any], dry_run: bool) -> None:
     asyncio.run(_run_live(config, dry_run))
 
 
+async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
+    """Every cycle: quote every configured symbol x contract type, trade
+    whichever quote has the smallest house margin right now, then wait out
+    the rest of `interval_seconds` before scanning again. No tick stream is
+    watched — digit contracts settle on their own, and there is nothing in
+    a digit's history worth reacting to (see README). The only genuine
+    lever is picking the cheapest bet on offer, and that varies by symbol.
+    """
+    load_dotenv()
+    token = os.environ.get("DERIV_API_TOKEN")
+    demo_mode = os.environ.get("DEMO_MODE", "true").strip().lower() != "false"
+
+    if not token:
+        sys.exit("Set DERIV_API_TOKEN in a .env file first (copy .env.example).")
+
+    if not demo_mode and not dry_run:
+        confirm = input(
+            "DEMO_MODE=false in your .env — this will place REAL-MONEY trades.\n"
+            "Type exactly: yes I understand   to continue: "
+        )
+        if confirm.strip().lower() != "yes i understand":
+            sys.exit("Aborted — DEMO_MODE left unconfirmed.")
+
+    st_cfg = config.get("scan_trade", {})
+    symbols = st_cfg.get("symbols", DEFAULT_SYMBOLS)
+    interval = float(st_cfg.get("interval_seconds", 45))
+    candidates = (
+        parse_candidate_specs(st_cfg["contracts"]) if st_cfg.get("contracts") else DEFAULT_CANDIDATES
+    )
+
+    risk = RiskManager(RiskLimits(**config["risk"]))
+    journal = TradeJournal(config.get("journal_path", "trade_journal.csv"))
+
+    staking_cfg = dict(config.get("staking", {}))
+    staking_name = staking_cfg.pop("name", "flat")
+    if staking_name != "flat" and not demo_mode:
+        sys.exit(
+            f"staking '{staking_name}' is DEMO ONLY and DEMO_MODE is false. "
+            "Progressive staking on a real-money account is refused by design — "
+            "see deriv_bot/staking.py and tools/martingale_sim.py."
+        )
+    staker = build_staker(staking_name, **staking_cfg)
+    base_stake = config["stake"]
+
+    api = DerivAPI(config["app_id"])
+    accounts = await api.list_accounts(token)
+    wanted_type = "real" if not demo_mode else "demo"
+    account = next((a for a in accounts if a["account_type"] == wanted_type), None)
+    if account is None:
+        sys.exit(
+            f"No {wanted_type} account found for this token/app — check "
+            f"DEMO_MODE and that the token has access to a {wanted_type} account."
+        )
+
+    ws_url = await api.request_trading_ws_url(token, account["account_id"])
+    await api.connect(ws_url)
+    try:
+        print(
+            f"Authorized as {account['account_id']} ({wanted_type.upper()} account) — "
+            f"scanning {len(symbols)} symbols x {len(candidates)} contracts every {interval:.0f}s"
+        )
+        currency = account.get("currency", config.get("currency", "USD"))
+
+        while risk.can_trade():
+            cycle_start = time.monotonic()
+            results = await scan_best(api, symbols, candidates, base_stake, currency)
+            if not results:
+                print("scan returned no quotes — retrying next cycle")
+            else:
+                best = results[0]
+                barrier_desc = "" if best["barrier"] is None else f":{best['barrier']}"
+                print(
+                    f"scanned {len(results)} quotes across {len(symbols)} symbols — cheapest: "
+                    f"{best['symbol']} {best['contract_type']}{barrier_desc} "
+                    f"(edge {best['edge_pct']:.2f}%, win prob {best['win_prob']:.0%})"
+                )
+
+                # Real quoted net multiplier, not the backtester's approximation —
+                # we just fetched the actual payout, so use it.
+                net_mult = best["payout"] / best["ask_price"] - 1 if best["ask_price"] else 0.0
+                budget_left = abs(risk.limits.max_daily_loss) + risk.daily_pnl
+                stake = round(staker.stake_for(base_stake, net_mult, budget_left), 2)
+                if stake < MIN_STAKE:
+                    print(f"Remaining budget ${budget_left:.2f} below minimum stake — stopping.")
+                    break
+
+                params: dict[str, Any] = dict(
+                    contract_type=best["contract_type"], underlying_symbol=best["symbol"],
+                    amount=stake, basis="stake", duration=1, duration_unit="t", currency=currency,
+                )
+                if best["barrier"] is not None:
+                    params["barrier"] = best["barrier"]
+                proposal = await api.proposal(**params)
+                details = proposal["proposal"]
+                payout = float(details["payout"])
+                ask_price = float(details["ask_price"])
+                reason = f"scanned {len(symbols)} symbols -> cheapest ({best['edge_pct']:.2f}% edge)"
+
+                if dry_run:
+                    print(
+                        f"[dry-run] would buy {best['symbol']} {best['contract_type']}{barrier_desc} "
+                        f"stake={ask_price:.2f} payout={payout:.2f} — {reason}"
+                    )
+                else:
+                    bought = await api.buy(details["id"], ask_price)
+                    contract_id = bought["buy"]["contract_id"]
+                    print(
+                        f"Bought {best['symbol']} {best['contract_type']}{barrier_desc} "
+                        f"stake={ask_price:.2f} payout={payout:.2f} contract_id={contract_id}"
+                    )
+                    contract = await api.wait_for_settlement(contract_id)
+                    profit = float(contract["profit"])
+                    bal = await api.balance()
+                    balance_after = bal["balance"]["balance"]
+                    print(f"Settled contract_id={contract_id} profit={profit:.2f} balance={balance_after:.2f}")
+
+                    risk.record_trade(profit)
+                    staker.record(profit)
+                    journal.record(
+                        symbol=best["symbol"], contract_type=best["contract_type"],
+                        barrier=best["barrier"], stake=ask_price, payout=payout,
+                        profit=profit, balance_after=balance_after, reason=reason,
+                    )
+                    if not risk.can_trade():
+                        print(f"Risk manager stopped the bot: {risk.stop_reason}")
+                        break
+
+            elapsed = time.monotonic() - cycle_start
+            if elapsed < interval:
+                await asyncio.sleep(interval - elapsed)
+    finally:
+        journal.close()
+        await api.close()
+
+
+def cmd_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
+    asyncio.run(_run_scan_trade(config, dry_run))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Deriv Digits trading bot")
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -288,6 +429,13 @@ def main() -> None:
     live.add_argument("--config", default="config.yaml")
     live.add_argument("--dry-run", action="store_true", help="Compute signals but never place trades")
 
+    st = sub.add_parser(
+        "scan-trade",
+        help="Every cycle, quote every symbol x contract and trade whichever is cheapest right now",
+    )
+    st.add_argument("--config", default="config.yaml")
+    st.add_argument("--dry-run", action="store_true", help="Compute the pick but never place trades")
+
     an = sub.add_parser("analyze", help="Report per-contract performance from the trade journal")
     an.add_argument("--config", default="config.yaml")
 
@@ -300,6 +448,8 @@ def main() -> None:
         cmd_scan_edge(config)
     elif args.mode == "analyze":
         cmd_analyze(config)
+    elif args.mode == "scan-trade":
+        cmd_scan_trade(config, dry_run=args.dry_run)
     else:
         cmd_live(config, dry_run=args.dry_run)
 
