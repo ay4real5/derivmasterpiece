@@ -198,6 +198,39 @@ def test_doubling_start_streak_defaults_to_a_fresh_ladder():
     assert DoublingMartingale().stake_for(2.0, 0.923, 10_000) == 2.0
 
 
+def test_doubling_reset_after_losses_wraps_the_ladder_back_to_base():
+    # 5,10,20,40,80,160,320 then start over at 5 rather than pinning at 320
+    s = DoublingMartingale(reset_after_losses=7)
+    stakes = []
+    for _ in range(10):
+        stakes.append(s.stake_for(5.0, 0.923, budget_left=100_000))
+        s.record(-1.0)
+    assert stakes[:7] == [5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 320.0]
+    assert stakes[7:] == [5.0, 10.0, 20.0]  # wrapped, not stuck at the ceiling
+
+
+def test_doubling_reset_after_losses_costs_the_full_ladder():
+    # one completed ladder books 635 as a realised loss; the next $5 bet is
+    # not trying to win it back
+    assert sum([5, 10, 20, 40, 80, 160, 320]) == 635
+
+
+def test_doubling_reset_after_losses_still_resets_on_a_win():
+    s = DoublingMartingale(reset_after_losses=7)
+    for _ in range(3):
+        s.record(-1.0)
+    assert s.stake_for(5.0, 0.923, 100_000) == 40.0
+    s.record(1.0)
+    assert s.stake_for(5.0, 0.923, 100_000) == 5.0
+
+
+def test_doubling_without_reset_after_losses_is_unchanged():
+    s = DoublingMartingale(max_stake_multiple=64)
+    for _ in range(9):
+        s.record(-1.0)
+    assert s.stake_for(5.0, 0.923, 100_000) == 320.0  # pinned at the cap, not wrapped
+
+
 def test_doubling_rejects_bad_parameters():
     with pytest.raises(ValueError):
         DoublingMartingale(multiplier=1.0)
@@ -205,6 +238,8 @@ def test_doubling_rejects_bad_parameters():
         DoublingMartingale(max_stake_multiple=0.5)
     with pytest.raises(ValueError):
         DoublingMartingale(start_streak=-1)
+    with pytest.raises(ValueError):
+        DoublingMartingale(reset_after_losses=0)
 
 
 def test_build_staker_doubling():

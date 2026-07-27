@@ -184,20 +184,36 @@ class DoublingMartingale(Staker):
     cycle. Note the streak it resumes is a bookkeeping figure, not a
     recoverable debt: the earlier session's losses are already realised and
     no stake in this session recovers money booked in that one.
+
+    `reset_after_losses` ends the ladder after N consecutive losses and
+    starts a fresh one at the base stake, instead of `max_stake_multiple`'s
+    behaviour of pinning every later bet at the ceiling. Base 5 with
+    reset_after_losses=7 gives 5,10,20,40,80,160,320 then back to 5.
+
+    Be clear about what wrapping means: the ladder abandons the losing run
+    rather than recovering it. A full 7-rung ladder that never wins books
+    5+10+20+40+80+160+320 = 635 as a realised loss, and the fresh $5 bet
+    that follows is not trying to win it back — it starts from zero. Capping
+    the ladder limits how much ONE run can lose; it does not make the money
+    recoverable, and it removes the (already unreliable) mechanism by which
+    martingale was supposed to claw a run back.
     """
 
     name = "doubling-martingale"
 
     def __init__(self, multiplier: float = 2.0, max_stake_multiple: float | None = None,
-                 start_streak: int = 0):
+                 start_streak: int = 0, reset_after_losses: int | None = None):
         if multiplier <= 1.0:
             raise ValueError("multiplier must be > 1")
         if max_stake_multiple is not None and max_stake_multiple < 1:
             raise ValueError("max_stake_multiple must be >= 1")
         if start_streak < 0:
             raise ValueError("start_streak must be >= 0")
+        if reset_after_losses is not None and reset_after_losses < 1:
+            raise ValueError("reset_after_losses must be >= 1")
         self.multiplier = multiplier
         self.max_stake_multiple = max_stake_multiple
+        self.reset_after_losses = reset_after_losses
         self.consecutive_losses = int(start_streak)
 
     def stake_for(self, base_stake: float, net_multiplier: float, budget_left: float) -> float:
@@ -209,6 +225,9 @@ class DoublingMartingale(Staker):
     def record(self, profit: float) -> None:
         if profit < 0:
             self.consecutive_losses += 1
+            if (self.reset_after_losses is not None
+                    and self.consecutive_losses >= self.reset_after_losses):
+                self.consecutive_losses = 0  # abandon this ladder, start a new one
         else:
             self.consecutive_losses = 0
 
