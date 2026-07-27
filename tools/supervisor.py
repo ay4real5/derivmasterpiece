@@ -95,19 +95,88 @@ def budget_verdict(pnl: float, max_daily_loss: float,
     return None
 
 
-def log(line: str, stream=sys.stdout) -> None:
+STOP_PREFIX = "Risk manager stopped the bot: "
+
+
+def child_python() -> str:
+    """Interpreter to launch the bot with.
+
+    The supervisor itself is run by pythonw.exe (see install_task.ps1) so
+    that it owns no console and cannot be killed by a console-close event.
+    The child doesn't need that — its output goes down a pipe either way —
+    and console python keeps stack traces intact, so swap pythonw back to
+    python when handing off.
+    """
+    exe = sys.executable
+    base = os.path.basename(exe).lower()
+    if base.startswith("pythonw"):
+        candidate = os.path.join(os.path.dirname(exe), base.replace("pythonw", "python", 1))
+        if os.path.exists(candidate):
+            return candidate
+    return exe
+
+
+def attach_stdio_to_log(log_path: str) -> None:
+    """pythonw.exe gives the process no stdout/stderr at all — they are None,
+    and the first `print` raises AttributeError. Point them at the log file
+    so the supervisor's own messages (and any traceback) still land
+    somewhere readable.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    handle = open(log_path, "a", encoding="utf-8", buffering=1)
+    if sys.stdout is None:
+        sys.stdout = handle
+    if sys.stderr is None:
+        sys.stderr = handle
+
+
+def classify_stop(reason: str | None) -> str | None:
+    """Bucket a `RiskManager.stop_reason` into how the supervisor should react.
+
+    "target"/"daily_loss" are day-scoped decisions and must survive a
+    restart. The other two limits are per-process by design — a fresh
+    process legitimately starts its consecutive-loss and trade counters at
+    zero — so they are transient and may be restarted immediately.
+    """
+    if not reason:
+        return None
+    if "profit target reached" in reason:
+        return "target"
+    if "max daily loss reached" in reason:
+        return "daily_loss"
+    if "consecutive losses" in reason or "max trade count" in reason:
+        return "transient"
+    return None
+
+
+def log(line: str, stream=None) -> None:
+    # Resolved at call time, never as a default argument: under pythonw.exe
+    # sys.stdout is None at import, so `stream=sys.stdout` would bind None
+    # forever and every log() call would raise AttributeError — even after
+    # attach_stdio_to_log() had repaired sys.stdout.
+    stream = stream if stream is not None else sys.stdout
+    if stream is None:
+        return
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     stream.write(f"[supervisor {stamp}] {line}\n")
     stream.flush()
 
 
-def run_once(config: str, log_path: str) -> int:
+def run_once(config: str, log_path: str) -> tuple[int, str | None]:
     """Launch one scan-trade process, streaming its output into `log_path`.
+
+    Returns (exit code, RiskManager stop reason if it printed one). The
+    child's own stop reason is the authority on WHY it ended — the journal
+    can't distinguish "hit the profit target" from "still mid-session",
+    because RiskManager measures PnL from process start while the journal
+    measures the whole UTC day.
 
     `-u` matters: without it Python block-buffers stdout when it is a file,
     so a live session can run for many minutes showing nothing at all.
     """
-    cmd = [sys.executable, "-u", "main.py", "scan-trade", "--config", config]
+    cmd = [child_python(), "-u", "main.py", "scan-trade", "--config", config]
+    stop_reason: str | None = None
     with open(log_path, "a", encoding="utf-8") as out:
         log(f"starting: {' '.join(cmd)}", out)
         proc = subprocess.Popen(
@@ -118,9 +187,12 @@ def run_once(config: str, log_path: str) -> int:
         for line in proc.stdout:
             out.write(line)
             out.flush()
+            if STOP_PREFIX in line:
+                stop_reason = line.split(STOP_PREFIX, 1)[1].strip()
         proc.wait()
-        log(f"exited with code {proc.returncode}", out)
-        return proc.returncode
+        log(f"exited with code {proc.returncode}"
+            + (f" — {stop_reason}" if stop_reason else ""), out)
+        return proc.returncode, stop_reason
 
 
 def main() -> None:
@@ -129,6 +201,14 @@ def main() -> None:
     ap.add_argument("--log", default="scan_trade_live.log")
     ap.add_argument("--journal", default=None, help="defaults to the config's journal_path")
     ap.add_argument("--once", action="store_true", help="run a single launch and exit (for testing)")
+    ap.add_argument(
+        "--on-target", choices=["stop", "continue"], default="stop",
+        help="what to do when the bot reports its profit target reached. "
+             "'stop' (default) banks the win and waits for the next UTC day. "
+             "'continue' relaunches immediately, which means the target never "
+             "banks anything and the -max_daily_loss stop becomes the only "
+             "terminal state.",
+    )
     args = ap.parse_args()
 
     import yaml  # local import so --help works without deps installed
@@ -142,6 +222,7 @@ def main() -> None:
     journal = args.journal or cfg.get("journal_path", "trade_journal.csv")
     journal_path = os.path.join(REPO, journal)
     log_path = os.path.join(REPO, args.log)
+    attach_stdio_to_log(log_path)
 
     log(f"supervising scan-trade | max_daily_loss={max_daily_loss} "
         f"target_profit={target_profit} journal={journal}")
@@ -160,8 +241,9 @@ def main() -> None:
 
         log(f"today's realised PnL {pnl:+.2f} — within limits, launching")
         started = time.monotonic()
+        stop_reason = None
         try:
-            code = run_once(args.config, log_path)
+            code, stop_reason = run_once(args.config, log_path)
         except Exception as exc:  # noqa: BLE001 — a supervisor may not die
             code = -1
             log(f"launch failed: {exc!r}")
@@ -169,6 +251,22 @@ def main() -> None:
 
         if args.once:
             return
+
+        # The child's stop reason outranks the journal check above. Without
+        # this, a "profit target reached" stop was relaunched within seconds
+        # (the day's journal PnL was still negative, so the budget check saw
+        # nothing wrong) and the target silently meant nothing.
+        kind = classify_stop(stop_reason)
+        if kind == "daily_loss" or (kind == "target" and args.on_target == "stop"):
+            wait = seconds_until_next_utc_day()
+            log(f"bot stopped deliberately — {stop_reason}. "
+                f"Not restarting; sleeping {wait / 3600:.1f}h until the next UTC day.")
+            time.sleep(wait)
+            backoff = MIN_BACKOFF
+            continue
+        if kind == "target":
+            log(f"profit target reached ({stop_reason}) but --on-target=continue "
+                f"— relaunching, so the target banks nothing")
 
         if ran_for >= HEALTHY_RUN_SECONDS:
             backoff = MIN_BACKOFF

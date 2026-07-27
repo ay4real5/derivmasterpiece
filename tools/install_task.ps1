@@ -31,7 +31,12 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $PSScriptRoot
-$python = Join-Path $repo ".venv\Scripts\python.exe"
+# pythonw.exe, not python.exe: a console-mode task owns a console window, and
+# closing it (or Ctrl+C in it) kills the whole tree — that is what killed the
+# first install, seen as LastTaskResult 0xC000013A STATUS_CONTROL_C_EXIT.
+# pythonw allocates no console, so there is nothing to close. The supervisor
+# redirects its own stdout/stderr to the log file to compensate.
+$python = Join-Path $repo ".venv\Scripts\pythonw.exe"
 $supervisor = Join-Path $repo "tools\supervisor.py"
 
 if ($Uninstall) {
@@ -45,13 +50,22 @@ if ($Uninstall) {
     return
 }
 
-if (-not (Test-Path $python))     { throw "venv python not found at $python — create the venv first." }
+if (-not (Test-Path $python))     { throw "venv pythonw not found at $python — create the venv first." }
 if (-not (Test-Path $supervisor)) { throw "supervisor not found at $supervisor" }
 
 $action = New-ScheduledTaskAction -Execute $python `
     -Argument "-u `"$supervisor`"" -WorkingDirectory $repo
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+
+# S4U ("run whether the user is logged on or not", without storing a
+# password) puts the task in a non-interactive session with NO console.
+# That matters: registered interactively the task owns a console window, so
+# closing that window or Ctrl+C in it kills the whole tree — observed as
+# LastTaskResult 0xC000013A (STATUS_CONTROL_C_EXIT), which is exactly how
+# the first install died. With S4U there is no window to close.
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
+    -LogonType S4U -RunLevel Limited
 
 # RestartCount/Interval cover the scheduler's own failures; the supervisor
 # handles ordinary crashes itself and is a long-running process, so no
@@ -65,9 +79,28 @@ $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
     -MultipleInstances IgnoreNew
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-    -Settings $settings -Description "Deriv scan-trade supervisor (demo account)" `
-    -Force | Out-Null
+# S4U additionally survives logoff, but registering it needs elevation. Fall
+# back rather than fail: pythonw already removes the console-close problem,
+# which is the failure actually observed. Never report success on a failed
+# Register — the first attempt did, and hid that the principal never changed.
+$registered = $false
+try {
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+        -Principal $principal -Settings $settings `
+        -Description "Deriv scan-trade supervisor (demo account)" `
+        -Force -ErrorAction Stop | Out-Null
+    $registered = $true
+    Write-Output "Registered with S4U (survives logoff as well as console close)."
+} catch {
+    Write-Warning "S4U registration failed ($($_.Exception.Message.Trim()))."
+    Write-Warning "Falling back to an interactive principal. Re-run this script in an"
+    Write-Warning "ELEVATED PowerShell to get S4U and survive logoff too."
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+        -Settings $settings -Description "Deriv scan-trade supervisor (demo account)" `
+        -Force -ErrorAction Stop | Out-Null
+    $registered = $true
+}
+if (-not $registered) { throw "Failed to register '$TaskName'." }
 
 Write-Output "Installed scheduled task '$TaskName'."
 Write-Output "  runs: $python -u `"$supervisor`""

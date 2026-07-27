@@ -5,6 +5,7 @@ import pytest
 
 from tools.supervisor import (
     budget_verdict,
+    classify_stop,
     day_pnl,
     seconds_until_next_utc_day,
 )
@@ -65,6 +66,42 @@ def test_budget_verdict_allows_restart_inside_the_budget():
 def test_budget_verdict_without_a_profit_target():
     assert budget_verdict(10_000.0, 1000.0, None) is None
     assert budget_verdict(-1000.0, 1000.0, None) is not None
+
+
+def test_classify_stop_recognises_the_day_scoped_limits():
+    # the exact strings RiskManager._check_limits emits
+    assert classify_stop("profit target reached (+250.78)") == "target"
+    assert classify_stop("max daily loss reached (-1000.00)") == "daily_loss"
+
+
+def test_classify_stop_treats_per_process_limits_as_transient():
+    assert classify_stop("20 consecutive losses") == "transient"
+    assert classify_stop("max trade count reached (100000)") == "transient"
+
+
+def test_classify_stop_handles_no_reason():
+    # a crash prints no stop line at all — restart normally
+    assert classify_stop(None) is None
+    assert classify_stop("") is None
+    assert classify_stop("websocket closed unexpectedly") is None
+
+
+def test_log_resolves_its_stream_at_call_time(monkeypatch, capsys):
+    # regression: log(stream=sys.stdout) as a DEFAULT bound None at import
+    # under pythonw.exe, so every call raised AttributeError and the task
+    # died within a second of starting.
+    import io
+
+    import tools.supervisor as sup
+
+    monkeypatch.setattr(sup.sys, "stdout", None)
+    sup.log("must not raise when stdout is None")  # no exception
+
+    buf = io.StringIO()
+    monkeypatch.setattr(sup.sys, "stdout", buf)
+    sup.log("hello")
+    assert "hello" in buf.getvalue()
+    assert buf.getvalue().startswith("[supervisor ")
 
 
 def test_seconds_until_next_utc_day():
