@@ -4,5 +4,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 trade_journal.csv
+*.log
 .venv/
 venv/

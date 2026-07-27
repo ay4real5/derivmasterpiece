@@ -91,9 +91,9 @@ def test_parse_candidate_specs_rejects_bad_input():
 def test_default_candidates_cover_the_three_requested_categories():
     kinds = {k for k, _ in DEFAULT_CANDIDATES}
     assert kinds == {"DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD", "CALL", "PUT"}
-    # explicitly barrier 3, not the cheapest-possible barrier
-    assert ("DIGITOVER", "3") in DEFAULT_CANDIDATES
-    assert ("DIGITUNDER", "3") in DEFAULT_CANDIDATES
+    # explicitly barrier 4, not the cheapest-possible barrier
+    assert ("DIGITOVER", "4") in DEFAULT_CANDIDATES
+    assert ("DIGITUNDER", "4") in DEFAULT_CANDIDATES
 
 
 def test_default_symbols_cover_both_volatility_families():
@@ -146,6 +146,6 @@ def test_category_and_symbol_rotation_cover_every_combination():
 
 def test_category_legs_cover_the_three_requested_types():
     assert set(CATEGORY_LEGS) == {"over_under", "even_odd", "rise_fall"}
-    assert CATEGORY_LEGS["over_under"] == [("DIGITOVER", "3"), ("DIGITUNDER", "3")]
+    assert CATEGORY_LEGS["over_under"] == [("DIGITOVER", "4"), ("DIGITUNDER", "4")]
     assert CATEGORY_LEGS["even_odd"] == [("DIGITEVEN", None), ("DIGITODD", None)]
     assert CATEGORY_LEGS["rise_fall"] == [("CALL", None), ("PUT", None)]

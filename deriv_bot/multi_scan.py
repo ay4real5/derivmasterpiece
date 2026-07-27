@@ -30,12 +30,12 @@ DEFAULT_SYMBOLS = [
 ]
 
 # Exactly three contract categories to interchange between: Over/Under at
-# barrier 3 (not the cheapest-possible barrier — a deliberate choice to
+# barrier 4 (not the cheapest-possible barrier — a deliberate choice to
 # compare a real mid-tier bet, not just default to the safest one), Even/
 # Odd, and Rise/Fall. The scanner still picks whichever is cheapest per
 # symbol per cycle; nothing here is a recommendation, just the menu.
 DEFAULT_CANDIDATES: list[tuple[str, str | None]] = [
-    ("DIGITOVER", "3"), ("DIGITUNDER", "3"),
+    ("DIGITOVER", "4"), ("DIGITUNDER", "4"),
     ("DIGITEVEN", None), ("DIGITODD", None),
     ("CALL", None), ("PUT", None),
 ]
@@ -46,7 +46,7 @@ DEFAULT_CANDIDATES: list[tuple[str, str | None]] = [
 # `RoundRobin`) rather than letting a single greedy "cheapest overall" pick
 # starve two of the three every time.
 CATEGORY_LEGS: dict[str, list[tuple[str, str | None]]] = {
-    "over_under": [("DIGITOVER", "3"), ("DIGITUNDER", "3")],
+    "over_under": [("DIGITOVER", "4"), ("DIGITUNDER", "4")],
     "even_odd": [("DIGITEVEN", None), ("DIGITODD", None)],
     "rise_fall": [("CALL", None), ("PUT", None)],
 }
