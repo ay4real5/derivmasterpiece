@@ -15,6 +15,7 @@ scan-edge check across symbols instead of assuming any one of them.
 """
 from __future__ import annotations
 
+from fractions import Fraction
 from typing import Any
 
 from .edge import theoretical_win_prob
@@ -38,6 +39,55 @@ DEFAULT_CANDIDATES: list[tuple[str, str | None]] = [
     ("DIGITEVEN", None), ("DIGITODD", None),
     ("CALL", None), ("PUT", None),
 ]
+
+
+# Which (contract_type, barrier) legs belong to each of the three
+# categories — used to force interchange between categories (see
+# `RoundRobin`) rather than letting a single greedy "cheapest overall" pick
+# starve two of the three every time.
+CATEGORY_LEGS: dict[str, list[tuple[str, str | None]]] = {
+    "over_under": [("DIGITOVER", "3"), ("DIGITUNDER", "3")],
+    "even_odd": [("DIGITEVEN", None), ("DIGITODD", None)],
+    "rise_fall": [("CALL", None), ("PUT", None)],
+}
+
+
+class RoundRobin:
+    """Weighted round-robin scheduler (credit-based, same mechanism as
+    `QuotaRotationStrategy`): every call to `next()` advances each item's
+    credit by its share of 1.0 and returns whichever item has the most
+    credit, deducting 1 from it. With equal shares this produces a plain
+    repeating cycle through all items in order — guaranteed full coverage,
+    not "whichever happens to be cheapest" (which can starve every option
+    but one forever, exactly what was observed: scan-trade greedily picking
+    the same symbol/contract every single cycle).
+
+    Credit is kept as exact `Fraction`s, not floats: with float division,
+    equal thirds (1/3 + 1/3 + 1/3) don't sum back to exactly the starting
+    point after a full cycle — binary floats can't represent 1/3 exactly —
+    so two credits that should be perfectly tied at a cycle boundary drift
+    apart by ~1e-16, and `max()`'s strict comparison then picks whichever
+    epsilon happens to be larger, silently breaking the cycle (confirmed:
+    a plain 3-item equal-weight rotation produced `a,b,c,c,a,b,c,a,b`
+    instead of `a,b,c` repeating). Exact rational arithmetic has no
+    rounding error, so ties stay exactly tied forever."""
+
+    def __init__(self, items: list[Any], weights: list[float] | None = None):
+        if not items:
+            raise ValueError("RoundRobin needs at least one item")
+        self.items = list(items)
+        n = len(self.items)
+        w = [Fraction(x).limit_denominator(10**9) for x in (weights or [1] * n)]
+        total = sum(w)
+        self.weights = [x / total for x in w]
+        self.credit = [Fraction(0)] * n
+
+    def next(self) -> Any:
+        for i in range(len(self.credit)):
+            self.credit[i] += self.weights[i]
+        idx = max(range(len(self.credit)), key=lambda i: self.credit[i])
+        self.credit[idx] -= 1
+        return self.items[idx]
 
 
 def parse_candidate_specs(specs: list[str]) -> list[tuple[str, str | None]]:

@@ -2,7 +2,9 @@ import asyncio
 
 import pytest
 
-from deriv_bot.multi_scan import DEFAULT_CANDIDATES, DEFAULT_SYMBOLS, parse_candidate_specs, scan_best
+from deriv_bot.multi_scan import (
+    CATEGORY_LEGS, DEFAULT_CANDIDATES, DEFAULT_SYMBOLS, RoundRobin, parse_candidate_specs, scan_best,
+)
 
 
 class _FakeAPI:
@@ -99,3 +101,51 @@ def test_default_symbols_cover_both_volatility_families():
         "R_10", "R_25", "R_50", "R_75", "R_100",
         "1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V",
     }
+
+
+def test_round_robin_equal_weights_cycles_every_item_in_order():
+    rr = RoundRobin(["a", "b", "c"])
+    picks = [rr.next() for _ in range(9)]
+    assert picks == ["a", "b", "c"] * 3
+
+
+def test_round_robin_never_repeats_within_one_full_cycle():
+    rr = RoundRobin(list(range(10)))
+    picks = [rr.next() for _ in range(10)]
+    assert sorted(picks) == list(range(10))  # every item exactly once
+
+
+def test_round_robin_proportional_weights():
+    rr = RoundRobin(["a", "b"], weights=[2.0, 1.0])
+    picks = [rr.next() for _ in range(30)]
+    assert picks.count("a") == 20
+    assert picks.count("b") == 10
+
+
+def test_round_robin_rejects_empty():
+    with pytest.raises(ValueError):
+        RoundRobin([])
+
+
+def test_category_and_symbol_rotation_cover_every_combination():
+    # Regression test for the actual bug reported: a pure "pick cheapest
+    # overall" scan kept picking the same symbol+category every cycle
+    # forever. Independent round-robins over 3 categories and N symbols
+    # must visit every (category, symbol) pair within lcm(3, N) cycles.
+    symbols = DEFAULT_SYMBOLS  # 10 symbols
+    category_rr = RoundRobin(list(CATEGORY_LEGS))
+    symbol_rr = RoundRobin(symbols)
+    seen = set()
+    cycles = 30  # lcm(3, 10)
+    for _ in range(cycles):
+        seen.add((category_rr.next(), symbol_rr.next()))
+    assert len(seen) == 3 * len(symbols)
+    assert {c for c, _ in seen} == set(CATEGORY_LEGS)
+    assert {s for _, s in seen} == set(symbols)
+
+
+def test_category_legs_cover_the_three_requested_types():
+    assert set(CATEGORY_LEGS) == {"over_under", "even_odd", "rise_fall"}
+    assert CATEGORY_LEGS["over_under"] == [("DIGITOVER", "3"), ("DIGITUNDER", "3")]
+    assert CATEGORY_LEGS["even_odd"] == [("DIGITEVEN", None), ("DIGITODD", None)]
+    assert CATEGORY_LEGS["rise_fall"] == [("CALL", None), ("PUT", None)]

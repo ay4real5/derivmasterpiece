@@ -19,7 +19,9 @@ from deriv_bot.backtester import (
 )
 from deriv_bot.edge import scan_edge
 from deriv_bot.journal import TradeJournal
-from deriv_bot.multi_scan import DEFAULT_CANDIDATES, DEFAULT_SYMBOLS, parse_candidate_specs, scan_best
+from deriv_bot.multi_scan import (
+    CATEGORY_LEGS, DEFAULT_CANDIDATES, DEFAULT_SYMBOLS, RoundRobin, parse_candidate_specs, scan_best,
+)
 from deriv_bot.risk import RiskLimits, RiskManager
 from deriv_bot.staking import build_staker
 from deriv_bot.strategy import STRATEGIES, Strategy, build_strategy
@@ -298,6 +300,13 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
     candidates = (
         parse_candidate_specs(st_cfg["contracts"]) if st_cfg.get("contracts") else DEFAULT_CANDIDATES
     )
+    # Force interchange: a pure "pick the single cheapest quote" greedily
+    # starves whichever categories/symbols are never quite the cheapest —
+    # observed live picking the same symbol+contract every cycle. These two
+    # independent round-robins guarantee every category and every symbol
+    # gets its turn; scoring only picks the best LEG within the forced cell.
+    category_rr = RoundRobin(list(CATEGORY_LEGS))
+    symbol_rr = RoundRobin(symbols)
 
     risk = RiskManager(RiskLimits(**config["risk"]))
     journal = TradeJournal(config.get("journal_path", "trade_journal.csv"))
@@ -338,12 +347,30 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
             if not results:
                 print("scan returned no quotes — retrying next cycle")
             else:
-                best = results[0]
+                overall_best = results[0]
+                print(
+                    f"scanned {len(results)} quotes across {len(symbols)} symbols — cheapest overall: "
+                    f"{overall_best['symbol']} {overall_best['contract_type']} "
+                    f"(edge {overall_best['edge_pct']:.2f}%) — not necessarily this cycle's pick"
+                )
+
+                category = category_rr.next()
+                symbol = symbol_rr.next()
+                legs = CATEGORY_LEGS[category]
+                cell = [r for r in results if r["symbol"] == symbol
+                       and (r["contract_type"], r["barrier"]) in legs]
+                if not cell:
+                    print(f"{category} not offered on {symbol} this cycle — skipping")
+                    elapsed = time.monotonic() - cycle_start
+                    if elapsed < interval:
+                        await asyncio.sleep(interval - elapsed)
+                    continue
+                best = min(cell, key=lambda r: r["edge_pct"])
                 barrier_desc = "" if best["barrier"] is None else f":{best['barrier']}"
                 print(
-                    f"scanned {len(results)} quotes across {len(symbols)} symbols — cheapest: "
-                    f"{best['symbol']} {best['contract_type']}{barrier_desc} "
-                    f"(edge {best['edge_pct']:.2f}%, win prob {best['win_prob']:.0%})"
+                    f"this cycle's turn: {category} on {symbol} -> picked "
+                    f"{best['contract_type']}{barrier_desc} (edge {best['edge_pct']:.2f}%, "
+                    f"win prob {best['win_prob']:.0%})"
                 )
 
                 # Real quoted net multiplier, not the backtester's approximation —
@@ -365,7 +392,7 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
                 details = proposal["proposal"]
                 payout = float(details["payout"])
                 ask_price = float(details["ask_price"])
-                reason = f"scanned {len(symbols)} symbols -> cheapest ({best['edge_pct']:.2f}% edge)"
+                reason = f"rotation: {category} on {symbol} ({best['edge_pct']:.2f}% edge)"
 
                 if dry_run:
                     print(
