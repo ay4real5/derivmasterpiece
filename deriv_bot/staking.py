@@ -176,18 +176,29 @@ class DoublingMartingale(Staker):
 
     `max_stake_multiple` hard-caps the sequence (e.g. 32 stops the climb
     at the 6th step of a 2x sequence: 10,20,40,80,160,320, then flat).
+
+    `start_streak` seeds the loss counter so a new process can pick up an
+    unfinished ladder from a previous session instead of dropping back to
+    the base stake (e.g. base=2 with start_streak=6 opens at $128). It only
+    sets the OPENING stake — the first win resets to base like any other
+    cycle. Note the streak it resumes is a bookkeeping figure, not a
+    recoverable debt: the earlier session's losses are already realised and
+    no stake in this session recovers money booked in that one.
     """
 
     name = "doubling-martingale"
 
-    def __init__(self, multiplier: float = 2.0, max_stake_multiple: float | None = None):
+    def __init__(self, multiplier: float = 2.0, max_stake_multiple: float | None = None,
+                 start_streak: int = 0):
         if multiplier <= 1.0:
             raise ValueError("multiplier must be > 1")
         if max_stake_multiple is not None and max_stake_multiple < 1:
             raise ValueError("max_stake_multiple must be >= 1")
+        if start_streak < 0:
+            raise ValueError("start_streak must be >= 0")
         self.multiplier = multiplier
         self.max_stake_multiple = max_stake_multiple
-        self.consecutive_losses = 0
+        self.consecutive_losses = int(start_streak)
 
     def stake_for(self, base_stake: float, net_multiplier: float, budget_left: float) -> float:
         wanted = base_stake * (self.multiplier ** self.consecutive_losses)

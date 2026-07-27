@@ -176,11 +176,35 @@ def test_doubling_never_overrides_contract():
     assert s.override_signal(Signal("DIGITOVER", "0", "quota pick")) is None
 
 
+def test_doubling_start_streak_resumes_a_previous_ladder():
+    # base 2 with six losses already booked opens at 2 * 2**6 = 128,
+    # then climbs 256, 512 like any other continuation of the sequence.
+    s = DoublingMartingale(max_stake_multiple=256, start_streak=6)
+    stakes = []
+    for _ in range(3):
+        stakes.append(s.stake_for(2.0, 0.923, budget_left=10_000))
+        s.record(-1.0)
+    assert stakes == [128.0, 256.0, 512.0]
+
+
+def test_doubling_start_streak_still_resets_to_base_on_a_win():
+    s = DoublingMartingale(start_streak=6)
+    assert s.stake_for(2.0, 0.923, 10_000) == 128.0
+    s.record(1.0)
+    assert s.stake_for(2.0, 0.923, 10_000) == 2.0
+
+
+def test_doubling_start_streak_defaults_to_a_fresh_ladder():
+    assert DoublingMartingale().stake_for(2.0, 0.923, 10_000) == 2.0
+
+
 def test_doubling_rejects_bad_parameters():
     with pytest.raises(ValueError):
         DoublingMartingale(multiplier=1.0)
     with pytest.raises(ValueError):
         DoublingMartingale(max_stake_multiple=0.5)
+    with pytest.raises(ValueError):
+        DoublingMartingale(start_streak=-1)
 
 
 def test_build_staker_doubling():
