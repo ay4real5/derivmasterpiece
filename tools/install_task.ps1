@@ -7,7 +7,7 @@ Why a Scheduled Task rather than a background process: anything launched
 from a shell is a child of that shell and dies with it. A task is owned by
 the scheduler, so logging out or closing the window leaves it alone.
 
-The task starts the SUPERVISOR, never main.py directly — the supervisor is
+The task starts the SUPERVISOR, never main.py directly - the supervisor is
 what refuses to relaunch past the daily loss limit. Pointing the task at
 main.py would restore the exact failure mode the supervisor exists to
 prevent (each fresh process starting daily_pnl back at 0.00).
@@ -32,7 +32,7 @@ $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $PSScriptRoot
 # pythonw.exe, not python.exe: a console-mode task owns a console window, and
-# closing it (or Ctrl+C in it) kills the whole tree — that is what killed the
+# closing it (or Ctrl+C in it) kills the whole tree - that is what killed the
 # first install, seen as LastTaskResult 0xC000013A STATUS_CONTROL_C_EXIT.
 # pythonw allocates no console, so there is nothing to close. The supervisor
 # redirects its own stdout/stderr to the log file to compensate.
@@ -50,7 +50,7 @@ if ($Uninstall) {
     return
 }
 
-if (-not (Test-Path $python))     { throw "venv pythonw not found at $python — create the venv first." }
+if (-not (Test-Path $python))     { throw "venv pythonw not found at $python - create the venv first." }
 if (-not (Test-Path $supervisor)) { throw "supervisor not found at $supervisor" }
 
 $action = New-ScheduledTaskAction -Execute $python `
@@ -61,7 +61,7 @@ $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 # S4U ("run whether the user is logged on or not", without storing a
 # password) puts the task in a non-interactive session with NO console.
 # That matters: registered interactively the task owns a console window, so
-# closing that window or Ctrl+C in it kills the whole tree — observed as
+# closing that window or Ctrl+C in it kills the whole tree - observed as
 # LastTaskResult 0xC000013A (STATUS_CONTROL_C_EXIT), which is exactly how
 # the first install died. With S4U there is no window to close.
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
@@ -82,7 +82,7 @@ $settings = New-ScheduledTaskSettingsSet `
 # S4U additionally survives logoff, but registering it needs elevation. Fall
 # back rather than fail: pythonw already removes the console-close problem,
 # which is the failure actually observed. Never report success on a failed
-# Register — the first attempt did, and hid that the principal never changed.
+# Register - the first attempt did, and hid that the principal never changed.
 $registered = $false
 try {
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
