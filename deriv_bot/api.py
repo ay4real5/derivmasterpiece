@@ -34,6 +34,10 @@ PUBLIC_WS_ENDPOINT = "wss://api.derivws.com/trading/v1/options/ws/public"
 REST_BASE = "https://api.derivws.com"
 
 
+# A tick contract settles in seconds; this only ever fires on a dead socket.
+SETTLEMENT_TIMEOUT = 120.0
+
+
 class DerivAPIError(Exception):
     pass
 
@@ -169,13 +173,34 @@ class DerivAPI:
     async def balance(self) -> dict[str, Any]:
         return await self.send({"balance": 1})
 
-    async def wait_for_settlement(self, contract_id: int | str) -> dict[str, Any]:
-        """Streams `proposal_open_contract` updates until the contract settles
-        (`is_sold`) and returns the final contract snapshot, including `profit`.
-        Deriv ends the stream itself once a contract is sold.
-        """
+    async def _stream_until_settled(self, contract_id: int | str) -> dict[str, Any]:
         async for msg in self.subscribe({"proposal_open_contract": 1, "contract_id": contract_id}):
             contract = msg["proposal_open_contract"]
             if contract.get("is_sold"):
                 return contract
         raise DerivAPIError(f"subscription ended before contract {contract_id} settled")
+
+    async def wait_for_settlement(self, contract_id: int | str,
+                                  timeout: float = SETTLEMENT_TIMEOUT) -> dict[str, Any]:
+        """Streams `proposal_open_contract` updates until the contract settles
+        (`is_sold`) and returns the final contract snapshot, including `profit`.
+        Deriv ends the stream itself once a contract is sold.
+
+        The timeout is not optional in practice. This connection drops with
+        `ConnectionClosedError: no close frame received or sent` — a half-open
+        socket, where no close frame ever arrives, so the underlying
+        `async for` simply never yields again. Without a deadline a drop
+        landing between buy and settlement hangs the bot silently and
+        indefinitely: observed as a bought contract with no matching "Settled"
+        line and no trades for 16 minutes, with the process still alive so
+        nothing restarted it. Tick contracts settle in seconds, so anything
+        approaching this timeout means the socket is gone, not that the
+        contract is slow.
+        """
+        try:
+            return await asyncio.wait_for(self._stream_until_settled(contract_id), timeout)
+        except asyncio.TimeoutError:
+            raise DerivAPIError(
+                f"contract {contract_id} did not settle within {timeout:.0f}s — "
+                "connection is probably half-open"
+            ) from None
