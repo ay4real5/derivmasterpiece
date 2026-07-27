@@ -28,6 +28,14 @@ from deriv_bot.strategy import STRATEGIES, Strategy, build_strategy
 
 MIN_STAKE = 0.35  # Deriv's minimum contract stake
 
+# Every combination in a scan failing means the connection is gone, not that
+# the market is quiet — a live scan normally returns ~60 quotes. Retrying
+# forever on the same dead websocket just spins: observed as an 18-minute
+# stall logging "scan returned no quotes" while placing no trades. Give it a
+# few cycles to cover a transient blip, then exit non-zero so the supervisor
+# restarts with a fresh connection.
+MAX_EMPTY_SCANS = 3
+
 
 def load_config(path: str) -> dict[str, Any]:
     with open(path, encoding="utf-8") as f:
@@ -341,12 +349,24 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
         )
         currency = account.get("currency", config.get("currency", "USD"))
 
+        empty_scans = 0
         while risk.can_trade():
             cycle_start = time.monotonic()
-            results = await scan_best(api, symbols, candidates, base_stake, currency)
+            scan_errors: list[str] = []
+            results = await scan_best(api, symbols, candidates, base_stake, currency,
+                                      errors=scan_errors)
             if not results:
-                print("scan returned no quotes — retrying next cycle")
+                empty_scans += 1
+                detail = f" — first error: {scan_errors[0]}" if scan_errors else ""
+                print(f"scan returned no quotes ({empty_scans}/{MAX_EMPTY_SCANS}){detail}")
+                if empty_scans >= MAX_EMPTY_SCANS:
+                    print(
+                        f"{empty_scans} consecutive empty scans — the connection looks dead. "
+                        "Exiting so the supervisor reconnects."
+                    )
+                    raise SystemExit(3)
             else:
+                empty_scans = 0
                 overall_best = results[0]
                 print(
                     f"scanned {len(results)} quotes across {len(symbols)} symbols — cheapest overall: "

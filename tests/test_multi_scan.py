@@ -149,3 +149,31 @@ def test_category_legs_cover_the_three_requested_types():
     assert CATEGORY_LEGS["over_under"] == [("DIGITOVER", "4"), ("DIGITUNDER", "4")]
     assert CATEGORY_LEGS["even_odd"] == [("DIGITEVEN", None), ("DIGITODD", None)]
     assert CATEGORY_LEGS["rise_fall"] == [("CALL", None), ("PUT", None)]
+
+
+def test_scan_best_records_why_each_combination_failed():
+    # the silent `except Exception: continue` discarded the reason, so a dead
+    # websocket looked identical to a quiet market and stalled for 18 minutes
+    api = _FakeAPI({})
+    errors: list[str] = []
+    results = asyncio.run(scan_best(
+        api, ["R_10"], [("DIGITEVEN", None), ("DIGITOVER", "4")], 2.0, "USD", errors=errors,
+    ))
+    assert results == []
+    assert len(errors) == 2
+    assert "R_10 DIGITEVEN: RuntimeError: not offered" in errors
+    assert "R_10 DIGITOVER:4: RuntimeError: not offered" in errors
+
+
+def test_scan_best_errors_argument_is_optional():
+    # existing callers pass no `errors` and must keep working unchanged
+    api = _FakeAPI({})
+    assert asyncio.run(scan_best(api, ["R_10"], [("DIGITEVEN", None)], 2.0, "USD")) == []
+
+
+def test_scan_best_records_nothing_when_every_quote_succeeds():
+    api = _FakeAPI({("R_10", "DIGITEVEN", None): (3.91, 2.00)})
+    errors: list[str] = []
+    results = asyncio.run(scan_best(api, ["R_10"], [("DIGITEVEN", None)], 2.0, "USD", errors=errors))
+    assert len(results) == 1
+    assert errors == []

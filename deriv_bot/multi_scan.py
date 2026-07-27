@@ -109,12 +109,20 @@ def parse_candidate_specs(specs: list[str]) -> list[tuple[str, str | None]]:
 
 async def scan_best(
     api: Any, symbols: list[str], candidates: list[tuple[str, str | None]],
-    stake: float, currency: str,
+    stake: float, currency: str, errors: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Queries every (symbol, contract) combination on the already-connected
     `api` and returns all successful quotes sorted by edge_pct ascending
     (cheapest first). Failures (contract not offered on that symbol right
-    now, etc.) are skipped silently — that's normal, not an error."""
+    now, etc.) are skipped — one failing combination is normal.
+
+    ALL of them failing is not. Pass `errors` to collect the reasons: a dead
+    websocket, an expired session or a rate limit makes every quote raise,
+    the caller sees only an empty list, and without this the real cause is
+    discarded. That produced a silent 18-minute stall — the process alive
+    and logging "scan returned no quotes" every cycle, never trading and
+    never failing loudly enough for the supervisor to restart it.
+    """
     results: list[dict[str, Any]] = []
     for symbol in symbols:
         for contract_type, barrier in candidates:
@@ -126,7 +134,10 @@ async def scan_best(
                 params["barrier"] = barrier
             try:
                 resp = await api.proposal(**params)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 — one bad combo must not stop the scan
+                if errors is not None:
+                    label = contract_type + ("" if barrier is None else f":{barrier}")
+                    errors.append(f"{symbol} {label}: {type(exc).__name__}: {exc}")
                 continue
             details = resp["proposal"]
             payout = float(details["payout"])
