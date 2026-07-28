@@ -23,6 +23,7 @@ from deriv_bot.journal import TradeJournal
 from deriv_bot.multi_scan import (
     CATEGORY_LEGS, DEFAULT_CANDIDATES, DEFAULT_SYMBOLS, RoundRobin, parse_candidate_specs, scan_best,
 )
+from deriv_bot.preflight import account_is_demo, run_checks
 from deriv_bot.reporting import (
     by_selector, load_settled, pooled_matched_gap, stake_matched,
 )
@@ -33,6 +34,47 @@ from deriv_bot.study import digits_from_ticks, score_legs, summarise
 from deriv_bot.strategy import STRATEGIES, Strategy, build_strategy
 
 MIN_STAKE = 0.35  # Deriv's minimum contract stake
+
+
+def confirm_real_money(config: dict[str, Any], demo_mode: bool, dry_run: bool) -> None:
+    """Gate real-money trading behind two independent switches.
+
+    The original version called `input()` unconditionally. The supervisor runs
+    the bot under `pythonw.exe` in session 0, which has NO stdin, so on a real
+    account that raised EOFError before a single trade - and the supervisor
+    would have restarted it into the same crash, forever.
+
+    So: `config.i_understand_real_money` must be true (checked always, works
+    headless), and the typed phrase is asked for only when there is a real
+    terminal to ask on. Two switches in two files means no single mistake can
+    start live trading, and no missing terminal can crash it.
+    """
+    if demo_mode or dry_run:
+        return
+
+    if config.get("i_understand_real_money") is not True:
+        sys.exit(
+            "DEMO_MODE=false but 'i_understand_real_money: true' is not set in "
+            "config.yaml.\nReal-money trading needs both switches, deliberately. "
+            "Refusing to start."
+        )
+
+    if not sys.stdin or not sys.stdin.isatty():
+        # Headless (scheduled task / pythonw): the config flag above is the
+        # acknowledgement. Say so loudly in the log rather than prompting a
+        # terminal that does not exist.
+        # ASCII: this line lands in scan_trade_live.log, which gets read back
+        # by cp1252 consoles and by PowerShell 5.1.
+        print("DEMO_MODE=false, i_understand_real_money=true, no TTY - "
+              "starting REAL-MONEY trading unattended.")
+        return
+
+    confirm = input(
+        "DEMO_MODE=false in your .env — this will place REAL-MONEY trades.\n"
+        "Type exactly: yes I understand   to continue: "
+    )
+    if confirm.strip().lower() != "yes i understand":
+        sys.exit("Aborted — DEMO_MODE left unconfirmed.")
 
 
 async def _study_pick(
@@ -201,6 +243,60 @@ def cmd_scan_edge(config: dict[str, Any]) -> None:
     )
 
 
+def cmd_preflight(config: dict[str, Any]) -> None:
+    """Refuse-or-approve, before anything is funded.
+
+    Deliberately a separate command rather than only a startup check: the
+    startup check runs inside a background process whose output nobody
+    watches, which is no place to discover that a limit is meaningless.
+    """
+    load_dotenv()
+    token = os.environ.get("DERIV_API_TOKEN")
+    demo_mode = os.environ.get("DEMO_MODE", "true").strip().lower() != "false"
+    if not token:
+        sys.exit("Set DERIV_API_TOKEN in a .env file first (copy .env.example).")
+
+    staking_name = dict(config.get("staking", {})).get("name", "flat")
+    wanted = "demo" if demo_mode else "real"
+    print(f"DEMO_MODE={'true' if demo_mode else 'false'} -> expecting a {wanted.upper()} account")
+
+    async def _look() -> tuple[dict[str, Any], float]:
+        api = DerivAPI(config["app_id"])
+        accounts = await api.list_accounts(token)
+        account = next((a for a in accounts if a.get("account_type", "").lower() == wanted),
+                       accounts[0] if accounts else {})
+        ws_url = await api.request_trading_ws_url(token, account["account_id"])
+        await api.connect(ws_url)
+        try:
+            bal = await api.balance()
+            return account, float(bal["balance"]["balance"])
+        finally:
+            await api.close()
+
+    try:
+        account, balance = asyncio.run(_look())
+    except Exception as exc:  # noqa: BLE001 — report, don't traceback at a user
+        sys.exit(f"Could not reach Deriv to check the account: {type(exc).__name__}: {exc}")
+
+    is_demo = account_is_demo(account)
+    kind = "DEMO" if is_demo else ("REAL" if is_demo is False else "UNKNOWN TYPE")
+    print(f"account {account.get('account_id', '?')} ({kind}) "
+          f"balance {balance:.2f} {account.get('currency', '')}")
+    print(f"staking: {staking_name}   stake: {config.get('stake')}   "
+          f"max_daily_loss: {config.get('risk', {}).get('max_daily_loss')}")
+
+    problems = run_checks(config, demo_mode, account, balance, staking_name)
+    if problems:
+        print(f"\nPREFLIGHT FAILED ({len(problems)}):")
+        for p in problems:
+            print(f"  - {p}")
+        sys.exit(1)
+    print("\nPREFLIGHT PASSED.")
+    if not demo_mode:
+        print("This account is REAL. Nothing here says the strategy is profitable —\n"
+              "the measured figure to check is loss as a % of staked in `analyze`.")
+
+
 def cmd_study_report(config: dict[str, Any]) -> None:
     """Compare study-selected trades against rotation-selected ones.
 
@@ -353,13 +449,7 @@ async def _run_live(config: dict[str, Any], dry_run: bool) -> None:
     if not token:
         sys.exit("Set DERIV_API_TOKEN in a .env file first (copy .env.example).")
 
-    if not demo_mode and not dry_run:
-        confirm = input(
-            "DEMO_MODE=false in your .env — this will place REAL-MONEY trades.\n"
-            "Type exactly: yes I understand   to continue: "
-        )
-        if confirm.strip().lower() != "yes i understand":
-            sys.exit("Aborted — DEMO_MODE left unconfirmed.")
+    confirm_real_money(config, demo_mode, dry_run)
 
     strategy = _build_strategy_from_config(config)
     risk = RiskManager(RiskLimits(**config["risk"]))
@@ -491,13 +581,7 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
     if not token:
         sys.exit("Set DERIV_API_TOKEN in a .env file first (copy .env.example).")
 
-    if not demo_mode and not dry_run:
-        confirm = input(
-            "DEMO_MODE=false in your .env — this will place REAL-MONEY trades.\n"
-            "Type exactly: yes I understand   to continue: "
-        )
-        if confirm.strip().lower() != "yes i understand":
-            sys.exit("Aborted — DEMO_MODE left unconfirmed.")
+    confirm_real_money(config, demo_mode, dry_run)
 
     st_cfg = config.get("scan_trade", {})
     symbols = st_cfg.get("symbols", DEFAULT_SYMBOLS)
@@ -710,6 +794,12 @@ def main() -> None:
     )
     sr.add_argument("--config", default="config.yaml")
 
+    pf = sub.add_parser(
+        "preflight",
+        help="Check the config and account are safe before trading (esp. real money)",
+    )
+    pf.add_argument("--config", default="config.yaml")
+
     it = sub.add_parser(
         "independence-test",
         help="Re-measure whether the digit stream carries any signal worth studying",
@@ -727,6 +817,8 @@ def main() -> None:
         cmd_analyze(config)
     elif args.mode == "study-report":
         cmd_study_report(config)
+    elif args.mode == "preflight":
+        cmd_preflight(config)
     elif args.mode == "independence-test":
         cmd_independence_test(config)
     elif args.mode == "scan-trade":

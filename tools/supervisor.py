@@ -209,6 +209,21 @@ def budget_verdict(pnl: float, max_daily_loss: float,
 
 STOP_PREFIX = "Risk manager stopped the bot: "
 
+# A misconfiguration is permanent: restarting cannot fix it, so retrying is a
+# guaranteed crash loop. These are the refusals main.py exits with, and they
+# matter most on the real-money path, where a loop would otherwise hammer
+# Deriv and bury the actual reason under thousands of restart lines.
+FATAL_CONFIG_MARKERS = (
+    "is DEMO ONLY and DEMO_MODE is false",
+    "i_understand_real_money",
+    "Set DERIV_API_TOKEN",
+    "PREFLIGHT FAILED",
+)
+
+
+def is_fatal_config_error(text: str) -> bool:
+    return any(marker in text for marker in FATAL_CONFIG_MARKERS)
+
 
 def child_python() -> str:
     """Interpreter to launch the bot with.
@@ -290,6 +305,7 @@ def run_once(config: str, log_path: str,
     """
     cmd = [child_python(), "-u", "main.py", "scan-trade", "--config", config]
     stop_reason: str | None = None
+    fatal_config: bool = False
     with open(log_path, "a", encoding="utf-8") as out:
         log(f"starting: {' '.join(cmd)}", out)
         proc = subprocess.Popen(
@@ -310,13 +326,16 @@ def run_once(config: str, log_path: str,
                 out.flush()
                 if STOP_PREFIX in line:
                     stop_reason = line.split(STOP_PREFIX, 1)[1].strip()
+                if is_fatal_config_error(line):
+                    fatal_config = True
             proc.wait()
         finally:
             if watchdog is not None:
                 watchdog.stop()
         log(f"exited with code {proc.returncode}"
             + (f" — {stop_reason}" if stop_reason else ""), out)
-        return proc.returncode, stop_reason
+        return proc.returncode, (stop_reason if not fatal_config
+                                 else f"FATAL CONFIG: {stop_reason or 'refused at startup'}")
 
 
 def main() -> None:
@@ -470,6 +489,18 @@ def main() -> None:
         # this, a "profit target reached" stop was relaunched within seconds
         # (the day's journal PnL was still negative, so the budget check saw
         # nothing wrong) and the target silently meant nothing.
+        # A misconfiguration cannot be fixed by restarting, so retrying it is
+        # a guaranteed crash loop. Stop the supervisor outright and say why:
+        # on the real-money path a loop would hammer Deriv and bury the actual
+        # reason under thousands of restart lines.
+        if stop_reason and stop_reason.startswith("FATAL CONFIG"):
+            log(f"{stop_reason} — this cannot be fixed by restarting. "
+                f"Supervisor stopping; fix config.yaml/.env and start it again.")
+            alert("fatal_config", "problem",
+                  "bot refused to start (config/permission). Supervisor stopped - "
+                  "fix the config and restart it.")
+            return
+
         kind = classify_stop(stop_reason)
         if kind in ("daily_loss", "target"):
             alert("risk_stop", "info", f"{stop_reason} (PnL today {pnl:+.2f})")

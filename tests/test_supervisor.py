@@ -265,3 +265,25 @@ def test_day_target_can_be_disabled_independently_of_the_session_target():
 def test_day_loss_backstop_survives_a_disabled_day_target():
     # disabling the profit cap must never disable the loss cap
     assert budget_verdict(-1000.0, 1000.0, None) is not None
+
+
+def test_fatal_config_errors_are_recognised():
+    """A misconfiguration is permanent - restarting cannot fix it, so the
+    supervisor must stop rather than loop. Especially on the real-money path,
+    where a loop would hammer Deriv and bury the reason."""
+    from tools.supervisor import is_fatal_config_error
+    assert is_fatal_config_error(
+        "staking 'doubling' is DEMO ONLY and DEMO_MODE is false. ...")
+    assert is_fatal_config_error(
+        "DEMO_MODE=false but 'i_understand_real_money: true' is not set")
+    assert is_fatal_config_error("Set DERIV_API_TOKEN in a .env file first")
+    assert is_fatal_config_error("PREFLIGHT FAILED (2):")
+
+
+def test_ordinary_failures_are_not_treated_as_fatal_config():
+    # these must still restart normally
+    from tools.supervisor import is_fatal_config_error
+    assert not is_fatal_config_error(
+        "scan returned no quotes (3/3) - first error: ConnectionClosedError")
+    assert not is_fatal_config_error("Risk manager stopped the bot: max daily loss reached")
+    assert not is_fatal_config_error("Bought R_10 DIGITEVEN stake=5.00")
