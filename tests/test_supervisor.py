@@ -1,12 +1,16 @@
 import csv
+import time
 from datetime import date, datetime, timezone
 
 import pytest
 
 from tools.supervisor import (
+    StallWatchdog,
     budget_verdict,
     classify_stop,
     day_pnl,
+    is_stalled,
+    last_trade_time,
     seconds_until_next_utc_day,
 )
 
@@ -109,3 +113,81 @@ def test_seconds_until_next_utc_day():
     assert seconds_until_next_utc_day(now) == pytest.approx(3600.0)
     now = datetime(2026, 7, 27, 0, 0, 0, tzinfo=timezone.utc)
     assert seconds_until_next_utc_day(now) == pytest.approx(86400.0)
+
+
+def test_last_trade_time_returns_the_newest_settled_row(tmp_path):
+    p = write_journal(tmp_path / "j.csv", [
+        {"timestamp": "2026-07-28T01:00:00+00:00", "profit": "-2"},
+        {"timestamp": "2026-07-28T01:05:00+00:00", "profit": "3"},
+    ])
+    assert last_trade_time(p) == datetime(2026, 7, 28, 1, 5, tzinfo=timezone.utc)
+
+
+def test_last_trade_time_ignores_unsettled_rows(tmp_path):
+    p = write_journal(tmp_path / "j.csv", [
+        {"timestamp": "2026-07-28T01:00:00+00:00", "profit": "-2"},
+        {"timestamp": "2026-07-28T01:05:00+00:00", "profit": ""},   # dry-run
+    ])
+    assert last_trade_time(p) == datetime(2026, 7, 28, 1, 0, tzinfo=timezone.utc)
+
+
+def test_last_trade_time_on_a_missing_file():
+    assert last_trade_time("nope.csv") is None
+
+
+def test_is_stalled_detects_a_long_silence(tmp_path):
+    # the phase-independent check: neither MAX_EMPTY_SCANS nor
+    # SETTLEMENT_TIMEOUT covers a drop during the buy or balance call
+    p = write_journal(tmp_path / "j.csv", [
+        {"timestamp": "2026-07-28T01:00:00+00:00", "profit": "-2"},
+    ])
+    now = datetime(2026, 7, 28, 1, 6, tzinfo=timezone.utc)  # 360s later
+    stalled, age = is_stalled(p, stall_seconds=300, now=now)
+    assert stalled
+    assert age == pytest.approx(360)
+
+
+def test_is_stalled_tolerates_a_normal_gap(tmp_path):
+    # real gaps reach ~94s; the threshold must not turn those into outages
+    p = write_journal(tmp_path / "j.csv", [
+        {"timestamp": "2026-07-28T01:00:00+00:00", "profit": "-2"},
+    ])
+    now = datetime(2026, 7, 28, 1, 1, 34, tzinfo=timezone.utc)  # 94s
+    stalled, _ = is_stalled(p, stall_seconds=300, now=now)
+    assert not stalled
+
+
+def test_is_stalled_is_false_before_any_trade(tmp_path):
+    # a fresh journal is not evidence of a stall
+    p = write_journal(tmp_path / "j.csv", [])
+    stalled, age = is_stalled(p, stall_seconds=300)
+    assert not stalled
+    assert age == 0.0
+
+
+def test_watchdog_fires_and_calls_back(tmp_path):
+    p = write_journal(tmp_path / "j.csv", [
+        {"timestamp": "2020-01-01T00:00:00+00:00", "profit": "-2"},  # ancient
+    ])
+    seen = []
+    wd = StallWatchdog(p, stall_seconds=1, on_stall=seen.append, poll_seconds=0.05)
+    wd.start()
+    deadline = time.monotonic() + 3
+    while not seen and time.monotonic() < deadline:
+        time.sleep(0.02)
+    wd.stop()
+    assert wd.fired
+    assert seen and seen[0] > 0
+
+
+def test_watchdog_stays_quiet_while_trading(tmp_path):
+    p = str(tmp_path / "j.csv")
+    seen = []
+    wd = StallWatchdog(p, stall_seconds=300, on_stall=seen.append, poll_seconds=0.05)
+    # rewrite a fresh trade on every poll, as a live bot would
+    write_journal(p, [{"timestamp": datetime.now(timezone.utc).isoformat(), "profit": "1"}])
+    wd.start()
+    time.sleep(0.4)
+    wd.stop()
+    assert not wd.fired
+    assert seen == []

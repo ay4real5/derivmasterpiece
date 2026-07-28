@@ -25,7 +25,9 @@ param(
     [switch]$Start,
     [switch]$Uninstall,
     [switch]$KeepAwake,
-    [string]$TaskName = "DerivScanTradeSupervisor"
+    [switch]$Alerts,
+    [string]$TaskName = "DerivScanTradeSupervisor",
+    [string]$AlertTaskName = "DerivAlertWatcher"
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,12 +42,46 @@ $python = Join-Path $repo ".venv\Scripts\pythonw.exe"
 $supervisor = Join-Path $repo "tools\supervisor.py"
 
 if ($Uninstall) {
-    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        Write-Output "Removed scheduled task '$TaskName'."
-    } else {
-        Write-Output "No scheduled task '$TaskName' to remove."
+    foreach ($name in @($TaskName, $AlertTaskName)) {
+        if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
+            Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $name -Confirm:$false
+            Write-Output "Removed scheduled task '$name'."
+        } else {
+            Write-Output "No scheduled task '$name' to remove."
+        }
+    }
+    return
+}
+
+if ($Alerts) {
+    # The alert watcher is deliberately NOT S4U. It needs the desktop that
+    # the supervisor lacks: session 0 cannot show a toast, which is the whole
+    # reason alerting is split across two processes. An Interactive principal
+    # at logon puts it in the user's session, and registering it needs no
+    # elevation.
+    $watcher = Join-Path $PSScriptRoot "alert_watcher.ps1"
+    if (-not (Test-Path $watcher)) { throw "alert_watcher.ps1 not found at $watcher" }
+
+    $aAction = New-ScheduledTaskAction -Execute "powershell.exe" `
+        -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watcher`"" `
+        -WorkingDirectory $repo
+    $aTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    $aSettings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable `
+        -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
+        -MultipleInstances IgnoreNew
+
+    Register-ScheduledTask -TaskName $AlertTaskName -Action $aAction -Trigger $aTrigger `
+        -Settings $aSettings -Description "Shows Deriv bot alerts as toasts (interactive session)" `
+        -Force -ErrorAction Stop | Out-Null
+    Write-Output "Installed alert watcher task '$AlertTaskName' (Interactive)."
+
+    if ($Start) {
+        Start-ScheduledTask -TaskName $AlertTaskName
+        Write-Output "Alert watcher started."
     }
     return
 }

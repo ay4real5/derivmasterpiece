@@ -30,8 +30,13 @@ import csv
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
+from typing import Any
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from alerts import Alert, emit  # noqa: E402  (path set above so this runs as a script)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -70,6 +75,97 @@ def day_pnl(journal_path: str, day: date) -> float:
             except ValueError:
                 continue
     return total
+
+
+def last_trade_time(journal_path: str) -> datetime | None:
+    """Timestamp of the newest settled trade, or None if there are none.
+
+    Reads the last usable row rather than parsing the whole file every poll.
+    """
+    if not os.path.exists(journal_path):
+        return None
+    newest: datetime | None = None
+    try:
+        with open(journal_path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                stamp = (row.get("timestamp") or "").strip()
+                if not stamp or not (row.get("profit") or "").strip():
+                    continue
+                try:
+                    newest = datetime.fromisoformat(stamp)
+                except ValueError:
+                    continue
+    except OSError:
+        return None
+    return newest
+
+
+def is_stalled(journal_path: str, stall_seconds: float,
+               now: datetime | None = None) -> tuple[bool, float]:
+    """(stalled, seconds since the last trade).
+
+    Phase-independent on purpose. `MAX_EMPTY_SCANS` guards the scan loop and
+    `SETTLEMENT_TIMEOUT` guards the post-buy wait, but a drop during the buy
+    or balance call is covered by neither and hangs with the process alive.
+    "Nothing has traded for N minutes" catches every such case without
+    needing to know which call is stuck.
+    """
+    now = now or datetime.now(timezone.utc)
+    last = last_trade_time(journal_path)
+    if last is None:
+        return False, 0.0  # nothing traded yet; not evidence of a stall
+    age = (now - last).total_seconds()
+    return age >= stall_seconds, age
+
+
+class StallWatchdog:
+    """Terminates a child that has stopped trading, so the normal restart
+    path picks it up.
+
+    Runs only while a child is alive. It must never fire while the supervisor
+    is idling between UTC days after a risk stop — no trades are *expected*
+    then, so their absence is not a stall.
+
+    The threshold is deliberately generous. Legitimate gaps reach ~94s
+    (measured after deep-review fetches were made concurrent; they reached
+    223s before that), and a cycle is skipped whenever a category is not
+    offered on the rotated symbol. Too tight and the watchdog becomes the
+    outage it was meant to catch.
+    """
+
+    def __init__(self, journal_path: str, stall_seconds: float,
+                 on_stall, poll_seconds: float = 30.0):
+        self.journal_path = journal_path
+        self.stall_seconds = stall_seconds
+        self.on_stall = on_stall
+        self.poll_seconds = poll_seconds
+        self.child: Any = None  # set by run_once before start()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.fired = False
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.poll_seconds):
+            try:
+                stalled, age = is_stalled(self.journal_path, self.stall_seconds)
+            except Exception:  # noqa: BLE001 — the watchdog may not crash the run
+                continue
+            if stalled:
+                self.fired = True
+                try:
+                    self.on_stall(age)
+                except Exception:  # noqa: BLE001
+                    pass
+                return
 
 
 def seconds_until_next_utc_day(now: datetime | None = None) -> float:
@@ -163,7 +259,8 @@ def log(line: str, stream=None) -> None:
     stream.flush()
 
 
-def run_once(config: str, log_path: str) -> tuple[int, str | None]:
+def run_once(config: str, log_path: str,
+             watchdog: "StallWatchdog | None" = None) -> tuple[int, str | None]:
     """Launch one scan-trade process, streaming its output into `log_path`.
 
     Returns (exit code, RiskManager stop reason if it printed one). The
@@ -184,12 +281,23 @@ def run_once(config: str, log_path: str) -> tuple[int, str | None]:
             text=True, bufsize=1,
         )
         assert proc.stdout is not None
-        for line in proc.stdout:
-            out.write(line)
-            out.flush()
-            if STOP_PREFIX in line:
-                stop_reason = line.split(STOP_PREFIX, 1)[1].strip()
-        proc.wait()
+
+        # The watchdog only exists while this child does: between UTC days
+        # after a risk stop there is no child and no expectation of trades,
+        # so silence there must not read as a stall.
+        if watchdog is not None:
+            watchdog.child = proc
+            watchdog.start()
+        try:
+            for line in proc.stdout:
+                out.write(line)
+                out.flush()
+                if STOP_PREFIX in line:
+                    stop_reason = line.split(STOP_PREFIX, 1)[1].strip()
+            proc.wait()
+        finally:
+            if watchdog is not None:
+                watchdog.stop()
         log(f"exited with code {proc.returncode}"
             + (f" — {stop_reason}" if stop_reason else ""), out)
         return proc.returncode, stop_reason
@@ -231,8 +339,28 @@ def main() -> None:
     log_path = os.path.join(REPO, args.log)
     attach_stdio_to_log(log_path)
 
+    al = cfg.get("alerts", {}) or {}
+    alerts_on = bool(al.get("enabled", False))
+    alerts_path = os.path.join(REPO, str(al.get("file", "alerts.jsonl")))
+    stall_seconds = float(al.get("stall_seconds", 300))
+    cooldown = float(al.get("cooldown_seconds", 900))
+    crash_loop_n = int(al.get("crash_loop_restarts", 3))
+    crash_loop_window = float(al.get("crash_loop_window_seconds", 600))
+    alert_state: dict[str, float] = {}
+    restart_times: list[float] = []
+    problem_open = False  # a stall/crash_loop was reported and not yet cleared
+
+    def alert(event: str, level: str, message: str) -> None:
+        """Write an alert for alert_watcher.ps1 to display. Never raises —
+        this process must not be taken down by the thing watching it."""
+        if not alerts_on:
+            return
+        if emit(alerts_path, Alert(event, level, message), alert_state, cooldown):
+            log(f"ALERT [{level}] {event}: {message}")
+
     log(f"supervising scan-trade | max_daily_loss={max_daily_loss} "
-        f"target_profit={target_profit} journal={journal}")
+        f"target_profit={target_profit} journal={journal} "
+        f"alerts={'on' if alerts_on else 'off'} stall_seconds={stall_seconds:.0f}")
 
     backoff = MIN_BACKOFF
     while True:
@@ -247,14 +375,44 @@ def main() -> None:
             continue
 
         log(f"today's realised PnL {pnl:+.2f} — within limits, launching")
+
+        # Recovery is reported only if a problem was reported first, so a
+        # normal restart stays silent.
+        if problem_open and not is_stalled(journal_path, stall_seconds)[0]:
+            alert_state.pop("recovered", None)
+            alert("recovered", "info", f"trading again — balance PnL today {pnl:+.2f}")
+            problem_open = False
+
+        def _on_stall(age: float) -> None:
+            nonlocal problem_open
+            problem_open = True
+            alert("stall", "problem",
+                  f"no settled trade for {age / 60:.1f} min — restarting the bot")
+            child = watchdog.child
+            if child is not None and child.poll() is None:
+                child.terminate()  # ends run_once's stdout loop -> normal restart
+
+        watchdog = StallWatchdog(journal_path, stall_seconds, _on_stall) if alerts_on else None
+
         started = time.monotonic()
         stop_reason = None
         try:
-            code, stop_reason = run_once(args.config, log_path)
+            code, stop_reason = run_once(args.config, log_path, watchdog)
         except Exception as exc:  # noqa: BLE001 — a supervisor may not die
             code = -1
             log(f"launch failed: {exc!r}")
         ran_for = time.monotonic() - started
+
+        # Self-healing failing repeatedly is worth interrupting someone for;
+        # a single drop that recovers in 5s is not.
+        now_mono = time.monotonic()
+        restart_times.append(now_mono)
+        restart_times[:] = [t for t in restart_times if now_mono - t <= crash_loop_window]
+        if len(restart_times) >= crash_loop_n:
+            problem_open = True
+            alert("crash_loop", "problem",
+                  f"{len(restart_times)} restarts in {crash_loop_window / 60:.0f} min "
+                  f"— last exit {code}")
 
         if args.once:
             return
@@ -264,6 +422,8 @@ def main() -> None:
         # (the day's journal PnL was still negative, so the budget check saw
         # nothing wrong) and the target silently meant nothing.
         kind = classify_stop(stop_reason)
+        if kind in ("daily_loss", "target"):
+            alert("risk_stop", "info", f"{stop_reason} (PnL today {pnl:+.2f})")
         if kind == "daily_loss" or (kind == "target" and on_target == "stop"):
             wait = seconds_until_next_utc_day()
             log(f"bot stopped deliberately — {stop_reason}. "
