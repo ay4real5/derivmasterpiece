@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import os
 import sys
 import time
@@ -24,9 +25,72 @@ from deriv_bot.multi_scan import (
 )
 from deriv_bot.risk import RiskLimits, RiskManager
 from deriv_bot.staking import build_staker
+from deriv_bot.study import choose as study_choose
+from deriv_bot.study import digits_from_ticks, score_legs, summarise
 from deriv_bot.strategy import STRATEGIES, Strategy, build_strategy
 
 MIN_STAKE = 0.35  # Deriv's minimum contract stake
+
+
+async def _study_pick(
+    api: Any, cfg: dict[str, Any], results: list[dict[str, Any]],
+    symbol: str, legs: list[tuple[str, str | None]], after_loss: bool,
+    symbols: list[str], candidates: list[tuple[str, str | None]],
+) -> tuple[dict[str, Any] | None, str]:
+    """Study recent digit history before staking; return (pick, selector).
+
+    A normal cycle studies only the symbol the rotation landed on — one extra
+    `ticks_history` call. After a loss, `deep_after_loss` widens the window
+    and studies EVERY symbol, which is the "look harder after a loss"
+    behaviour that was asked for; it costs ~10 calls, so it is deliberately
+    not the default path.
+
+    Returns `(None, "study-abstain")` when nothing clears the significance
+    threshold, and the caller keeps its cheapest-margin pick. On a genuinely
+    independent digit stream that abstention is the expected outcome, not a
+    failure.
+    """
+    deep = bool(after_loss and cfg.get("deep_after_loss", True))
+    window = int(cfg.get("deep_window", 1000) if deep else cfg.get("window", 200))
+    min_z = float(cfg.get("min_z", 2.0))
+    mode = str(cfg.get("mode", "momentum"))
+
+    target_symbols = list(symbols) if deep else [symbol]
+    target_legs = list(candidates) if deep else list(legs)
+    if deep:
+        print(f"study: DEEP review after a loss — {len(target_symbols)} symbols "
+              f"x {len(target_legs)} legs over {window} digits")
+
+    best_row: dict[str, Any] | None = None
+    best_quote: dict[str, Any] | None = None
+    best_strength = float("-inf")
+
+    for sym in target_symbols:
+        try:
+            resp = await api.ticks_history(sym, count=window)
+            prices = resp["history"]["prices"]
+            pip_size = int(resp["pip_size"])
+        except Exception as exc:  # noqa: BLE001 — a failed study must not stop trading
+            print(f"study[{sym}]: history unavailable ({type(exc).__name__}: {exc}) — skipping")
+            continue
+
+        digits = digits_from_ticks(prices, pip_size)
+        scored = score_legs(digits, target_legs)
+        quotes = {(r["contract_type"], r["barrier"]): r
+                  for r in results if r["symbol"] == sym}
+        print(f"study[{sym}] {summarise(scored)}")
+        row, why = study_choose(scored, quotes, min_z=min_z, mode=mode)
+        print(f"study[{sym}] {why}")
+        if row is None:
+            continue
+        strength = row["z"] if mode == "momentum" else -row["z"]
+        if strength > best_strength:
+            best_strength, best_row = strength, row
+            best_quote = quotes[(row["contract_type"], row["barrier"])]
+
+    if best_row is None or best_quote is None:
+        return None, "study-abstain"
+    return best_quote, "study"
 
 # Every combination in a scan failing means the connection is gone, not that
 # the market is quiet — a live scan normally returns ~60 quotes. Retrying
@@ -117,6 +181,106 @@ def cmd_scan_edge(config: dict[str, Any]) -> None:
         "win prob is the theoretical value (digits are ~uniform), not a prediction — "
         "this tells you which bet is cheapest, not which one will win."
     )
+
+
+def cmd_study_report(config: dict[str, Any]) -> None:
+    """Compare study-selected trades against rotation-selected ones.
+
+    This is the question the study step exists to answer, and the only
+    honest way to answer it: same account, same period, same staking — the
+    only thing that differs is which mechanism chose the contract. A
+    difference inside the noise band means the study is decorative and
+    `scan_trade.study.enabled` should go back to false.
+    """
+    path = config.get("journal_path", "trade_journal.csv")
+    try:
+        rows = list(csv.DictReader(open(path, newline="", encoding="utf-8")))
+    except FileNotFoundError:
+        sys.exit(f"No journal found at {path}.")
+
+    buckets: dict[str, dict[str, float]] = {}
+    for row in rows:
+        if not row.get("profit"):
+            continue
+        # Rows written before the selector column existed are pre-study
+        # history; label them so they are never silently counted as rotation
+        # results from the study era.
+        key = row.get("selector") or "(pre-study)"
+        b = buckets.setdefault(key, {"trades": 0, "wins": 0, "pnl": 0.0, "staked": 0.0})
+        profit = float(row["profit"])
+        b["trades"] += 1
+        b["wins"] += 1 if profit > 0 else 0
+        b["pnl"] += profit
+        b["staked"] += float(row["stake"]) if row.get("stake") else 0.0
+
+    if not buckets:
+        sys.exit(f"{path} has no settled trades yet.")
+
+    print(f"{'selector':<14}{'trades':>8}{'win rate':>10}{'total pnl':>12}{'avg/trade':>12}{'% of staked':>13}")
+    for name, b in sorted(buckets.items()):
+        n = b["trades"]
+        print(
+            f"{name:<14}{n:>8}{b['wins'] / n:>9.1%}{b['pnl']:>12.2f}"
+            f"{b['pnl'] / n:>12.3f}{(b['pnl'] / b['staked'] * 100) if b['staked'] else 0:>12.2f}%"
+        )
+
+    study = buckets.get("study")
+    rotation = buckets.get("rotation")
+    if study and rotation and study["trades"] >= 30 and rotation["trades"] >= 30:
+        gap = study["pnl"] / study["trades"] - rotation["pnl"] / rotation["trades"]
+        print(f"\nstudy minus rotation: {gap:+.4f} per trade "
+              f"({study['trades']} vs {rotation['trades']} trades)")
+        print("Treat anything under a few cents per trade as noise at these sample sizes.")
+    else:
+        print("\nNot enough trades in both buckets yet for a meaningful comparison "
+              "(want 30+ each).")
+
+
+def cmd_independence_test(config: dict[str, Any]) -> None:
+    """Re-measure whether this digit stream carries any signal to study.
+
+    The claim that it does not is currently a comment in strategy.py quoting
+    a one-off measurement. This re-runs it against live data so the premise
+    is checkable rather than trusted.
+    """
+    symbol = config.get("symbol", "R_100")
+    count = int(config.get("backtest_ticks", 5000))
+    prices, pip_size = asyncio.run(fetch_ticks(config["app_id"], symbol, count))
+    digits = digits_from_ticks(prices, pip_size)
+    if len(digits) < 100:
+        sys.exit(f"only got {len(digits)} digits — need more data")
+
+    # Uniformity: are the ten digits equally likely?
+    expected = len(digits) / 10
+    counts = [digits.count(d) for d in range(10)]
+    chi_uniform = sum((c - expected) ** 2 / expected for c in counts)
+
+    # Lag-1 independence: does the previous digit predict the next?
+    trans = [[0] * 10 for _ in range(10)]
+    for a, b in zip(digits, digits[1:]):
+        trans[a][b] += 1
+    chi_lag1 = 0.0
+    total = len(digits) - 1
+    row_tot = [sum(r) for r in trans]
+    col_tot = [sum(trans[a][b] for a in range(10)) for b in range(10)]
+    for a in range(10):
+        for b in range(10):
+            exp = row_tot[a] * col_tot[b] / total if total else 0
+            if exp > 0:
+                chi_lag1 += (trans[a][b] - exp) ** 2 / exp
+
+    print(f"symbol {symbol}, {len(digits)} digits (pip_size={pip_size})")
+    print(f"digit counts: {counts}")
+    print(f"\nuniformity chi-square : {chi_uniform:8.2f}   (9 df, 5% threshold 16.92)")
+    print(f"lag-1 transition chi-2: {chi_lag1:8.2f}   (81 df, 5% threshold 103.01)")
+    verdict_u = "NO deviation detected" if chi_uniform < 16.92 else "deviation from uniform"
+    verdict_l = "NO dependence detected" if chi_lag1 < 103.01 else "dependence detected"
+    print(f"\nuniformity : {verdict_u}")
+    print(f"lag-1      : {verdict_l}")
+    if chi_uniform < 16.92 and chi_lag1 < 103.01:
+        print("\nBoth tests pass as random. On an independent stream no study of past\n"
+              "digits can improve which side wins — expect `study` to abstain, and\n"
+              "expect study-report to show no real gap over rotation.")
 
 
 def cmd_analyze(config: dict[str, Any]) -> None:
@@ -315,6 +479,7 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
     # gets its turn; scoring only picks the best LEG within the forced cell.
     category_rr = RoundRobin(list(CATEGORY_LEGS))
     symbol_rr = RoundRobin(symbols)
+    study_cfg = dict(st_cfg.get("study", {}))
 
     risk = RiskManager(RiskLimits(**config["risk"]))
     journal = TradeJournal(config.get("journal_path", "trade_journal.csv"))
@@ -350,6 +515,7 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
         currency = account.get("currency", config.get("currency", "USD"))
 
         empty_scans = 0
+        last_trade_lost = False  # drives the deeper post-loss study
         while risk.can_trade():
             cycle_start = time.monotonic()
             scan_errors: list[str] = []
@@ -386,12 +552,28 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
                         await asyncio.sleep(interval - elapsed)
                     continue
                 best = min(cell, key=lambda r: r["edge_pct"])
+                selector = "rotation"
                 barrier_desc = "" if best["barrier"] is None else f":{best['barrier']}"
                 print(
                     f"this cycle's turn: {category} on {symbol} -> picked "
                     f"{best['contract_type']}{barrier_desc} (edge {best['edge_pct']:.2f}%, "
                     f"win prob {best['win_prob']:.0%})"
                 )
+
+                if study_cfg.get("enabled"):
+                    studied, selector = await _study_pick(
+                        api, study_cfg, results, symbol, legs,
+                        after_loss=last_trade_lost,
+                        symbols=symbols, candidates=candidates,
+                    )
+                    if studied is not None:
+                        best = studied
+                        barrier_desc = "" if best["barrier"] is None else f":{best['barrier']}"
+                        print(
+                            f"study overrode the rotation -> {best['symbol']} "
+                            f"{best['contract_type']}{barrier_desc} "
+                            f"(edge {best['edge_pct']:.2f}%)"
+                        )
 
                 # Real quoted net multiplier, not the backtester's approximation —
                 # we just fetched the actual payout, so use it.
@@ -412,7 +594,8 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
                 details = proposal["proposal"]
                 payout = float(details["payout"])
                 ask_price = float(details["ask_price"])
-                reason = f"rotation: {category} on {symbol} ({best['edge_pct']:.2f}% edge)"
+                reason = (f"{selector}: {category} on {best['symbol']} "
+                          f"({best['edge_pct']:.2f}% edge)")
 
                 if dry_run:
                     print(
@@ -434,10 +617,12 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
 
                     risk.record_trade(profit)
                     staker.record(profit)
+                    last_trade_lost = profit < 0
                     journal.record(
                         symbol=best["symbol"], contract_type=best["contract_type"],
                         barrier=best["barrier"], stake=ask_price, payout=payout,
                         profit=profit, balance_after=balance_after, reason=reason,
+                        selector=selector,
                     )
                     if not risk.can_trade():
                         print(f"Risk manager stopped the bot: {risk.stop_reason}")
@@ -486,6 +671,18 @@ def main() -> None:
     an = sub.add_parser("analyze", help="Report per-contract performance from the trade journal")
     an.add_argument("--config", default="config.yaml")
 
+    sr = sub.add_parser(
+        "study-report",
+        help="Compare study-selected trades against rotation-selected ones",
+    )
+    sr.add_argument("--config", default="config.yaml")
+
+    it = sub.add_parser(
+        "independence-test",
+        help="Re-measure whether the digit stream carries any signal worth studying",
+    )
+    it.add_argument("--config", default="config.yaml")
+
     args = parser.parse_args()
     config = load_config(args.config)
 
@@ -495,6 +692,10 @@ def main() -> None:
         cmd_scan_edge(config)
     elif args.mode == "analyze":
         cmd_analyze(config)
+    elif args.mode == "study-report":
+        cmd_study_report(config)
+    elif args.mode == "independence-test":
+        cmd_independence_test(config)
     elif args.mode == "scan-trade":
         cmd_scan_trade(config, dry_run=args.dry_run)
     else:

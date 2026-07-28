@@ -232,7 +232,7 @@ class RotationStrategy(Strategy):
         return Signal(kind, barrier, f"rotation leg {kind}{'' if barrier is None else ':' + barrier}")
 
 
-def _leg_wins(kind: str, barrier: str | None, digit: int) -> bool:
+def leg_wins(kind: str, barrier: str | None, digit: int) -> bool:
     """Would this contract have won on `digit`? (CALL/PUT need prices, so
     they are excluded from digit-based bias scoring.)"""
     b = int(barrier) if barrier is not None else 0
@@ -243,6 +243,10 @@ def _leg_wins(kind: str, barrier: str | None, digit: int) -> bool:
     if kind == "DIGITMATCH": return digit == b
     if kind == "DIGITDIFF":  return digit != b
     raise ValueError(f"{kind} cannot be scored from digits alone")
+
+
+# Kept so existing imports/tests referring to the private name keep working.
+_leg_wins = leg_wins
 
 
 class AdaptiveBiasStrategy(Strategy):
