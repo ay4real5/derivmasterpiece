@@ -202,12 +202,13 @@ def main() -> None:
     ap.add_argument("--journal", default=None, help="defaults to the config's journal_path")
     ap.add_argument("--once", action="store_true", help="run a single launch and exit (for testing)")
     ap.add_argument(
-        "--on-target", choices=["stop", "continue"], default="stop",
+        "--on-target", choices=["stop", "continue"], default=None,
         help="what to do when the bot reports its profit target reached. "
-             "'stop' (default) banks the win and waits for the next UTC day. "
-             "'continue' relaunches immediately, which means the target never "
-             "banks anything and the -max_daily_loss stop becomes the only "
-             "terminal state.",
+             "'stop' banks the win and waits for the next UTC day. 'continue' "
+             "relaunches immediately, which means the target never banks "
+             "anything and the -max_daily_loss stop becomes the only terminal "
+             "state. Overrides supervisor.on_target in the config; defaults "
+             "to 'stop' if neither is set.",
     )
     args = ap.parse_args()
 
@@ -219,6 +220,12 @@ def main() -> None:
     max_daily_loss = float(risk.get("max_daily_loss", 0) or 0)
     target_profit = risk.get("target_profit")
     target_profit = float(target_profit) if target_profit is not None else None
+    # Config-driven so this can change without re-registering the scheduled
+    # task — re-registering unelevated silently drops the S4U principal back
+    # to Interactive and loses logoff survival.
+    on_target = args.on_target or str(cfg.get("supervisor", {}).get("on_target", "stop")).lower()
+    if on_target not in ("stop", "continue"):
+        raise SystemExit(f"supervisor.on_target must be 'stop' or 'continue', got {on_target!r}")
     journal = args.journal or cfg.get("journal_path", "trade_journal.csv")
     journal_path = os.path.join(REPO, journal)
     log_path = os.path.join(REPO, args.log)
@@ -257,7 +264,7 @@ def main() -> None:
         # (the day's journal PnL was still negative, so the budget check saw
         # nothing wrong) and the target silently meant nothing.
         kind = classify_stop(stop_reason)
-        if kind == "daily_loss" or (kind == "target" and args.on_target == "stop"):
+        if kind == "daily_loss" or (kind == "target" and on_target == "stop"):
             wait = seconds_until_next_utc_day()
             log(f"bot stopped deliberately — {stop_reason}. "
                 f"Not restarting; sleeping {wait / 3600:.1f}h until the next UTC day.")
@@ -265,8 +272,9 @@ def main() -> None:
             backoff = MIN_BACKOFF
             continue
         if kind == "target":
-            log(f"profit target reached ({stop_reason}) but --on-target=continue "
-                f"— relaunching, so the target banks nothing")
+            log(f"profit target reached ({stop_reason}) but on_target=continue "
+                f"— relaunching back-to-back. The target banks nothing in this mode; "
+                f"-{max_daily_loss:.0f} is the only state that ends the day.")
 
         if ran_for >= HEALTHY_RUN_SECONDS:
             backoff = MIN_BACKOFF
