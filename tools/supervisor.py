@@ -347,9 +347,28 @@ def main() -> None:
     # Config-driven so this can change without re-registering the scheduled
     # task — re-registering unelevated silently drops the S4U principal back
     # to Interactive and loses logoff survival.
-    on_target = args.on_target or str(cfg.get("supervisor", {}).get("on_target", "stop")).lower()
+    sup_cfg = cfg.get("supervisor", {}) or {}
+    on_target = args.on_target or str(sup_cfg.get("on_target", "stop")).lower()
     if on_target not in ("stop", "continue"):
         raise SystemExit(f"supervisor.on_target must be 'stop' or 'continue', got {on_target!r}")
+
+    # Two different clocks, deliberately separable.
+    #
+    # RiskManager inside the child measures PnL from PROCESS START, so
+    # risk.target_profit is really a per-SESSION target. This day-level check
+    # measures the whole UTC day from the journal. When both use the same
+    # number they fight: a day already up +1197 refuses to launch a fresh
+    # session aiming for +1000, because the day figure is past the target
+    # before the session begins.
+    #
+    # supervisor.day_target_profit sets the day-level figure independently;
+    # `null` disables the day-level target entirely and lets each session's
+    # own target do the banking. The day-level LOSS check is never disabled.
+    if "day_target_profit" in sup_cfg:
+        raw = sup_cfg["day_target_profit"]
+        day_target_profit = float(raw) if raw is not None else None
+    else:
+        day_target_profit = target_profit
     journal = args.journal or cfg.get("journal_path", "trade_journal.csv")
     journal_path = os.path.join(REPO, journal)
     log_path = os.path.join(REPO, args.log)
@@ -374,8 +393,9 @@ def main() -> None:
         if emit(alerts_path, Alert(event, level, message), alert_state, cooldown):
             log(f"ALERT [{level}] {event}: {message}")
 
-    log(f"supervising scan-trade | max_daily_loss={max_daily_loss} "
-        f"target_profit={target_profit} journal={journal} "
+    log(f"supervising scan-trade | session target={target_profit} "
+        f"session/day loss={max_daily_loss} day_target={day_target_profit} "
+        f"on_target={on_target} journal={journal} "
         f"alerts={'on' if alerts_on else 'off'} stall_seconds={stall_seconds:.0f}")
 
     backoff = MIN_BACKOFF
@@ -387,7 +407,7 @@ def main() -> None:
         # day anyway — so the two mechanisms disagreed and "keep running back
         # to back" silently stopped after 15 hours. The daily LOSS side is
         # never waived; that is the only real protection in the system.
-        day_target = target_profit if on_target == "stop" else None
+        day_target = day_target_profit if on_target == "stop" else None
         verdict = budget_verdict(pnl, max_daily_loss, day_target)
         if verdict:
             wait = seconds_until_next_utc_day()

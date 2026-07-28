@@ -250,3 +250,18 @@ def test_is_stalled_uses_the_trade_when_it_is_newer_than_child_start(tmp_path):
     stalled, age = is_stalled(p, stall_seconds=300, now=now, since=started)
     assert not stalled
     assert age == pytest.approx(60)
+
+
+def test_day_target_can_be_disabled_independently_of_the_session_target():
+    """Two clocks: RiskManager measures from process start (a session), this
+    check measures the whole UTC day. Sharing one number made a day already
+    up +1197 refuse to launch a fresh session aiming for +1000."""
+    # day target disabled -> a profitable day still launches new sessions
+    assert budget_verdict(1197.45, 1000.0, None) is None
+    # day target set -> it caps the day as before
+    assert budget_verdict(1197.45, 1000.0, 1000.0) is not None
+
+
+def test_day_loss_backstop_survives_a_disabled_day_target():
+    # disabling the profit cap must never disable the loss cap
+    assert budget_verdict(-1000.0, 1000.0, None) is not None
