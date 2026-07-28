@@ -20,6 +20,7 @@ from deriv_bot.backtester import (
 )
 from deriv_bot.edge import scan_edge
 from deriv_bot.journal import TradeJournal
+from deriv_bot.ladder_risk import max_base_for_risk, summarise as ladder_summary
 from deriv_bot.multi_scan import (
     CATEGORY_LEGS, DEFAULT_CANDIDATES, DEFAULT_SYMBOLS, RoundRobin, parse_candidate_specs, scan_best,
 )
@@ -242,6 +243,39 @@ def cmd_scan_edge(config: dict[str, Any]) -> None:
         "win prob is the theoretical value (digits are ~uniform), not a prediction — "
         "this tells you which bet is cheapest, not which one will win."
     )
+
+
+def cmd_ladder_risk(config: dict[str, Any], capital: float | None,
+                    win_prob: float, seconds_per_trade: float) -> None:
+    """Size the ladder against the capital behind it."""
+    staking = config.get("staking") or {}
+    base = float(config.get("stake") or 0)
+    rungs = int(staking.get("reset_after_losses") or 0)
+    if staking.get("name") != "doubling" or rungs < 1:
+        sys.exit("config staking is not a capped doubling ladder "
+                 "(need staking.name: doubling and reset_after_losses).")
+
+    if capital is None:
+        capital = float(input("capital / balance to size against: ").strip())
+
+    s = ladder_summary(capital, base, rungs, win_prob, seconds_per_trade)
+    print(f"ladder: {rungs} rungs from a {base:.2f} base, win prob {win_prob:.0%}")
+    print(f"capital: {capital:,.2f}")
+    print()
+    print(f"one full ladder costs      {s['ladder_cost']:,.2f} "
+          f"({s['pct_of_capital']:.1f}% of capital)")
+    print(f"capital covers             {s['ladders_capital_covers']:.1f} full ladders")
+    print(f"a wipeout arrives every    {s['wipeout_every_n_trades']:.0f} trades "
+          f"= {s['hours_between_wipeouts']:.1f} hours at {seconds_per_trade:.0f}s/trade")
+    print(f"over 24h of running        {s['wipeouts_per_day']:.1f} wipeouts "
+          f"= {s['expected_daily_wipeout_cost']:,.0f}")
+    print()
+    print("base stake for a chosen risk per ladder:")
+    for pct in (0.05, 0.10, 0.15, 0.20):
+        print(f"  {pct:.0%} of capital -> base <= {max_base_for_risk(capital, rungs, pct):.2f}")
+    print()
+    print("Rarity per cycle is not rarity per day: 1-in-128 per cycle becomes")
+    print("several per day once the bot runs unattended.")
 
 
 def cmd_use_profile(name: str | None) -> None:
@@ -847,6 +881,15 @@ def main() -> None:
     )
     sr.add_argument("--config", default="config.yaml")
 
+    lr = sub.add_parser(
+        "ladder-risk",
+        help="Size the doubling ladder against your capital",
+    )
+    lr.add_argument("--config", default="config.yaml")
+    lr.add_argument("--capital", type=float, default=None)
+    lr.add_argument("--win-prob", type=float, default=0.5)
+    lr.add_argument("--seconds-per-trade", type=float, default=45.0)
+
     up = sub.add_parser(
         "use-profile",
         help="List or activate a named configuration (demo-ladder, real-flat, ...)",
@@ -877,6 +920,8 @@ def main() -> None:
         cmd_analyze(config)
     elif args.mode == "study-report":
         cmd_study_report(config)
+    elif args.mode == "ladder-risk":
+        cmd_ladder_risk(config, args.capital, args.win_prob, args.seconds_per_trade)
     elif args.mode == "use-profile":
         cmd_use_profile(args.name)
     elif args.mode == "preflight":
