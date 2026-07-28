@@ -365,10 +365,23 @@ def main() -> None:
     backoff = MIN_BACKOFF
     while True:
         pnl = day_pnl(journal_path, utc_today())
-        verdict = budget_verdict(pnl, max_daily_loss, target_profit)
+        # on_target=continue must apply here too, not only to the child's stop
+        # reason. It previously did not: the child was relaunched past its
+        # target, but this day-level check then halted for the rest of the UTC
+        # day anyway — so the two mechanisms disagreed and "keep running back
+        # to back" silently stopped after 15 hours. The daily LOSS side is
+        # never waived; that is the only real protection in the system.
+        day_target = target_profit if on_target == "stop" else None
+        verdict = budget_verdict(pnl, max_daily_loss, day_target)
         if verdict:
             wait = seconds_until_next_utc_day()
             log(f"NOT restarting — {verdict}. Sleeping {wait / 3600:.1f}h until the next UTC day.")
+            # This halt used to be silent. It is the single most important
+            # thing to report — the bot is deliberately done for the day, and
+            # without an alert the user only finds out by noticing the balance
+            # stopped moving, which is exactly what happened.
+            alert("day_complete", "info",
+                  f"{verdict} — idle until the next UTC day ({wait / 3600:.1f}h)")
             if args.once:
                 return
             time.sleep(wait)

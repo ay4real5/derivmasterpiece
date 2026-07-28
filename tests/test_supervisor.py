@@ -191,3 +191,19 @@ def test_watchdog_stays_quiet_while_trading(tmp_path):
     wd.stop()
     assert not wd.fired
     assert seen == []
+
+
+def test_day_target_is_waived_when_on_target_is_continue():
+    """Regression: on_target=continue applied only to the child's stop
+    reason, while this day-level check halted anyway — so "keep running back
+    to back" silently stopped for 15h after the day's PnL passed +1000."""
+    # on_target == "stop": the day target halts
+    assert budget_verdict(1058.85, 1000.0, 1000.0) is not None
+    # on_target == "continue": caller passes None for the target
+    assert budget_verdict(1058.85, 1000.0, None) is None
+
+
+def test_daily_loss_is_never_waived_by_on_target():
+    # the loss stop is the only real protection and must survive every mode
+    assert budget_verdict(-1000.0, 1000.0, None) is not None
+    assert budget_verdict(-1500.0, 1000.0, None) is not None

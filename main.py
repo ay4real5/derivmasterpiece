@@ -23,6 +23,9 @@ from deriv_bot.journal import TradeJournal
 from deriv_bot.multi_scan import (
     CATEGORY_LEGS, DEFAULT_CANDIDATES, DEFAULT_SYMBOLS, RoundRobin, parse_candidate_specs, scan_best,
 )
+from deriv_bot.reporting import (
+    by_selector, load_settled, pooled_matched_gap, stake_matched,
+)
 from deriv_bot.risk import RiskLimits, RiskManager
 from deriv_bot.staking import build_staker
 from deriv_bot.study import choose as study_choose
@@ -209,46 +212,61 @@ def cmd_study_report(config: dict[str, Any]) -> None:
     """
     path = config.get("journal_path", "trade_journal.csv")
     try:
-        rows = list(csv.DictReader(open(path, newline="", encoding="utf-8")))
+        rows = load_settled(path)
     except FileNotFoundError:
         sys.exit(f"No journal found at {path}.")
-
-    buckets: dict[str, dict[str, float]] = {}
-    for row in rows:
-        if not row.get("profit"):
-            continue
-        # Rows written before the selector column existed are pre-study
-        # history; label them so they are never silently counted as rotation
-        # results from the study era.
-        key = row.get("selector") or "(pre-study)"
-        b = buckets.setdefault(key, {"trades": 0, "wins": 0, "pnl": 0.0, "staked": 0.0})
-        profit = float(row["profit"])
-        b["trades"] += 1
-        b["wins"] += 1 if profit > 0 else 0
-        b["pnl"] += profit
-        b["staked"] += float(row["stake"]) if row.get("stake") else 0.0
-
-    if not buckets:
+    if not rows:
         sys.exit(f"{path} has no settled trades yet.")
 
-    print(f"{'selector':<14}{'trades':>8}{'win rate':>10}{'total pnl':>12}{'avg/trade':>12}{'% of staked':>13}")
+    buckets = by_selector(rows)
+    print(f"{'selector':<15}{'trades':>8}{'win rate':>10}{'total pnl':>12}"
+          f"{'avg/trade':>12}{'mean stake':>12}{'% of staked':>13}")
     for name, b in sorted(buckets.items()):
-        n = b["trades"]
         print(
-            f"{name:<14}{n:>8}{b['wins'] / n:>9.1%}{b['pnl']:>12.2f}"
-            f"{b['pnl'] / n:>12.3f}{(b['pnl'] / b['staked'] * 100) if b['staked'] else 0:>12.2f}%"
+            f"{name:<15}{b['trades']:>8}{b['win_rate']:>9.1%}{b['pnl']:>12.2f}"
+            f"{b['avg']:>12.3f}{b['mean_stake']:>12.2f}{b['pct_of_staked']:>12.2f}%"
         )
 
-    study = buckets.get("study")
-    rotation = buckets.get("rotation")
-    if study and rotation and study["trades"] >= 30 and rotation["trades"] >= 30:
-        gap = study["pnl"] / study["trades"] - rotation["pnl"] / rotation["trades"]
-        print(f"\nstudy minus rotation: {gap:+.4f} per trade "
-              f"({study['trades']} vs {rotation['trades']} trades)")
-        print("Treat anything under a few cents per trade as noise at these sample sizes.")
+    # study vs study-abstain, NOT vs rotation: once the study is enabled,
+    # every trade is one or the other and `rotation` never appears.
+    a, b = buckets.get("study"), buckets.get("study-abstain")
+    if not a or not b or a["trades"] < 30 or b["trades"] < 30:
+        print("\nNot enough trades in both study and study-abstain yet "
+              "for a meaningful comparison (want 30+ each).")
+        return
+
+    print(f"\nMean stake: study {a['mean_stake']:.2f} vs abstain {b['mean_stake']:.2f}. "
+          "The deep review runs after a loss, when the ladder is already\n"
+          "elevated, so avg/trade above compares stake size as much as skill. "
+          "The stake-matched table below is the one that answers the question.")
+
+    cells = stake_matched(rows, "study", "study-abstain")
+    if not cells:
+        print("\nNo stake rung yet has 10+ trades on both sides — nothing "
+              "comparable like-for-like.")
+        return
+
+    print(f"\n{'stake':>8}{'study n':>9}{'study win':>11}{'abstain n':>11}"
+          f"{'abstain win':>13}{'gap':>9}{'sigma':>8}")
+    for c in cells:
+        print(f"{c['stake']:>8.0f}{c['a']['trades']:>9}{c['a']['win_rate']:>10.1%}"
+              f"{c['b']['trades']:>11}{c['b']['win_rate']:>12.1%}"
+              f"{c['gap']:>+8.1%}{c['sigma']:>+8.2f}")
+
+    gap, se, sigma = pooled_matched_gap(cells)
+    print(f"\nstake-matched win-rate gap: {gap:+.2%} (SE {se:.2%}, {sigma:+.2f} sigma)")
+    if abs(sigma) < 1.96:
+        print("Inside +/-1.96 sigma: consistent with chance. On an independent "
+              "digit stream this is\nthe expected result, and it means the study "
+              "is not adding information.")
+    elif sigma > 0:
+        print("Beyond +1.96 sigma: the study is winning more often than "
+              "abstaining. Worth a second\nlook before believing it - re-check "
+              "after another few hundred trades.")
     else:
-        print("\nNot enough trades in both buckets yet for a meaningful comparison "
-              "(want 30+ each).")
+        print("Beyond -1.96 sigma: the study is winning LESS often than "
+              "abstaining, which is what\nfitting noise looks like. Consider "
+              "scan_trade.study.enabled: false.")
 
 
 def cmd_independence_test(config: dict[str, Any]) -> None:
