@@ -101,20 +101,30 @@ def last_trade_time(journal_path: str) -> datetime | None:
 
 
 def is_stalled(journal_path: str, stall_seconds: float,
-               now: datetime | None = None) -> tuple[bool, float]:
-    """(stalled, seconds since the last trade).
+               now: datetime | None = None,
+               since: datetime | None = None) -> tuple[bool, float]:
+    """(stalled, seconds of silence).
 
     Phase-independent on purpose. `MAX_EMPTY_SCANS` guards the scan loop and
     `SETTLEMENT_TIMEOUT` guards the post-buy wait, but a drop during the buy
     or balance call is covered by neither and hangs with the process alive.
     "Nothing has traded for N minutes" catches every such case without
     needing to know which call is stuck.
+
+    `since` is when the current child started, and silence is measured from
+    the LATER of that and the last trade. Without it the first version killed
+    every freshly started child: after the bot had been idle overnight or
+    parked for the day, the newest trade was already hours old, so the
+    watchdog declared a stall within 30 seconds of launch and restarted it
+    again, forever. A child that has only been alive 30s cannot have been
+    silent for an hour.
     """
     now = now or datetime.now(timezone.utc)
     last = last_trade_time(journal_path)
-    if last is None:
+    if last is None and since is None:
         return False, 0.0  # nothing traded yet; not evidence of a stall
-    age = (now - last).total_seconds()
+    marks = [m for m in (last, since) if m is not None]
+    age = (now - max(marks)).total_seconds()
     return age >= stall_seconds, age
 
 
@@ -140,11 +150,16 @@ class StallWatchdog:
         self.on_stall = on_stall
         self.poll_seconds = poll_seconds
         self.child: Any = None  # set by run_once before start()
+        self.started_at: datetime | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.fired = False
 
     def start(self) -> None:
+        # Silence is measured from here, not from the last trade in the
+        # journal, so a child launched after an idle period is not judged on
+        # the previous session's silence.
+        self.started_at = datetime.now(timezone.utc)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -156,7 +171,8 @@ class StallWatchdog:
     def _run(self) -> None:
         while not self._stop.wait(self.poll_seconds):
             try:
-                stalled, age = is_stalled(self.journal_path, self.stall_seconds)
+                stalled, age = is_stalled(self.journal_path, self.stall_seconds,
+                                          since=self.started_at)
             except Exception:  # noqa: BLE001 — the watchdog may not crash the run
                 continue
             if stalled:

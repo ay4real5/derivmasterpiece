@@ -207,3 +207,46 @@ def test_daily_loss_is_never_waived_by_on_target():
     # the loss stop is the only real protection and must survive every mode
     assert budget_verdict(-1000.0, 1000.0, None) is not None
     assert budget_verdict(-1500.0, 1000.0, None) is not None
+
+
+def test_is_stalled_measures_from_child_start_not_an_old_trade(tmp_path):
+    """Regression: the watchdog killed every freshly launched child. After an
+    idle period the newest trade is already hours old, so it declared a stall
+    30s after launch and restarted forever - seen live as
+    'no settled trade for 66.9 min - restarting' followed by 'ran 30s'."""
+    p = write_journal(tmp_path / "j.csv", [
+        {"timestamp": "2026-07-28T08:49:00+00:00", "profit": "-2"},
+    ])
+    now = datetime(2026, 7, 28, 9, 56, 49, tzinfo=timezone.utc)   # trade is 67 min old
+    started = datetime(2026, 7, 28, 9, 56, 19, tzinfo=timezone.utc)  # child is 30s old
+
+    stalled, age = is_stalled(p, stall_seconds=300, now=now, since=started)
+    assert not stalled
+    assert age == pytest.approx(30)
+
+    # without `since` the old behaviour still (wrongly) trips - kept explicit
+    # so the difference the fix makes is visible
+    assert is_stalled(p, stall_seconds=300, now=now)[0]
+
+
+def test_is_stalled_still_fires_on_a_long_lived_silent_child(tmp_path):
+    # the real case must keep working: child alive for an hour, no trades
+    p = write_journal(tmp_path / "j.csv", [
+        {"timestamp": "2026-07-28T08:00:00+00:00", "profit": "-2"},
+    ])
+    now = datetime(2026, 7, 28, 9, 0, 0, tzinfo=timezone.utc)
+    started = datetime(2026, 7, 28, 8, 0, 0, tzinfo=timezone.utc)
+    stalled, age = is_stalled(p, stall_seconds=300, now=now, since=started)
+    assert stalled
+    assert age == pytest.approx(3600)
+
+
+def test_is_stalled_uses_the_trade_when_it_is_newer_than_child_start(tmp_path):
+    p = write_journal(tmp_path / "j.csv", [
+        {"timestamp": "2026-07-28T09:00:00+00:00", "profit": "-2"},
+    ])
+    now = datetime(2026, 7, 28, 9, 1, 0, tzinfo=timezone.utc)
+    started = datetime(2026, 7, 28, 8, 0, 0, tzinfo=timezone.utc)
+    stalled, age = is_stalled(p, stall_seconds=300, now=now, since=started)
+    assert not stalled
+    assert age == pytest.approx(60)
