@@ -56,3 +56,28 @@ def test_smaller_base_reduces_both_cost_and_share():
     # frequency is unchanged by stake size - only the damage per event moves
     assert small["wipeouts_per_day"] == pytest.approx(
         summarise(2795.13, 5.0, 7)["wipeouts_per_day"])
+
+
+SEQ = [3, 3.25, 6.77, 14.10, 29.36, 61.13, 127.29, 265.05]
+
+
+def test_an_explicit_sequence_is_summed_not_assumed():
+    """A recovery ladder climbs at ~2.083x, so base*(2**n - 1) would misstate
+    its worst case - and the worst case is what everything else derives from."""
+    assert ladder_cost(3, 8, SEQ) == pytest.approx(509.95)
+    assert ladder_cost(3, 8) == 765          # what doubling would have said
+
+
+def test_max_base_scales_the_whole_sequence():
+    base = max_base_for_risk(2836.0, 8, 0.10, SEQ)
+    scaled = [s * base / SEQ[0] for s in SEQ]
+    assert sum(scaled) == pytest.approx(283.6, rel=1e-6)
+
+
+def test_summarise_uses_the_sequence_when_given():
+    s = summarise(2836.0, 3.0, 8, sequence=SEQ)
+    assert s["ladder_cost"] == pytest.approx(509.95)
+    assert s["pct_of_capital"] == pytest.approx(18.0, abs=0.1)
+    # 8 rungs, not 7: wipeouts are half as frequent as the old ladder
+    assert s["wipeout_every_n_trades"] == pytest.approx(512, rel=0.02)
+    assert s["wipeouts_per_day"] == pytest.approx(3.75, abs=0.1)

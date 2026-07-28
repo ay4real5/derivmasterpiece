@@ -232,11 +232,110 @@ class DoublingMartingale(Staker):
             self.consecutive_losses = 0
 
 
+class RecoveryLadder(Staker):
+    """Each bet recovers the cumulative loss of the current cycle, assuming a
+    FIXED payout, then wraps back to base after `reset_after_losses`.
+
+        base 3, assumed_net 0.9231, 8 rungs ->
+        3, 3.25, 6.77, 14.10, 29.36, 61.13, 127.29, 265.05   (total 509.95)
+
+    Two things separate this from `RecoveryMartingale`:
+
+    1. **No base profit is added per rung.** RecoveryMartingale stakes
+       `base + loss/net`, so a win recovers the run AND banks another base.
+       This stakes `loss/net`, which recovers the run and nothing more. The
+       consequence is worth being explicit about: at exactly the assumed
+       payout, winning on rung 2+ returns precisely ZERO for the cycle. Only
+       a first-bet win profits.
+
+    2. **The divisor is a fixed assumption, not the live quote.** That is
+       deliberate. Sized against the WORST contract the bot trades (~3.8%
+       margin, net 0.9231), every recovery that happens to land on a cheaper
+       contract over-recovers and turns a break-even rung into a small
+       profit - +0.10 at rung 2 up to +7.96 at rung 8 on a 2.25% contract.
+       Using the live quote instead would recover exactly and bank nothing,
+       every time.
+
+       So this staking only earns beyond the first rung when paired with
+       selection that prefers cheap contracts. The two settings are related;
+       changing one without the other loses the benefit.
+
+    Measured against the 7-rung doubling ladder on the real edge mix
+    (600k trades): -229 vs -509 per 1,000 trades, wipeouts every 511 trades
+    instead of 254, worst case 509.95 instead of 635.00. The loss as a
+    percentage of everything staked is unchanged at ~2.87% - the gain comes
+    entirely from staking less, not from a better bet.
+    """
+
+    name = "recovery-ladder"
+
+    def __init__(self, assumed_net_multiplier: float = 0.9231,
+                 reset_after_losses: int | None = None,
+                 max_stake_multiple: float | None = None,
+                 cycle_profit: float = 0.0,
+                 sequence: list[float] | None = None):
+        # An explicit sequence wins over the computed one. Compounding
+        # rounded stakes drifts ~0.2% by the eighth rung, and for the number
+        # that decides the worst case it is better to state the ladder
+        # outright than to re-derive it and hope the rounding agrees.
+        if sequence is not None:
+            if not sequence or any(s <= 0 for s in sequence):
+                raise ValueError("sequence must be non-empty and all positive")
+            sequence = [float(s) for s in sequence]
+        self.sequence = sequence
+        if not 0.0 < assumed_net_multiplier <= 1.0:
+            raise ValueError("assumed_net_multiplier must be in (0, 1]")
+        if reset_after_losses is not None and reset_after_losses < 1:
+            raise ValueError("reset_after_losses must be >= 1")
+        if max_stake_multiple is not None and max_stake_multiple < 1:
+            raise ValueError("max_stake_multiple must be >= 1")
+        if cycle_profit < 0:
+            raise ValueError("cycle_profit must be >= 0")
+        self.assumed_net_multiplier = assumed_net_multiplier
+        self.reset_after_losses = reset_after_losses
+        self.max_stake_multiple = max_stake_multiple
+        self.cycle_profit = cycle_profit
+        self.cycle_loss = 0.0
+        self.consecutive_losses = 0
+
+    def stake_for(self, base_stake: float, net_multiplier: float,
+                  budget_left: float) -> float:
+        if self.sequence is not None:
+            # Past the end of an explicit ladder, hold the last rung. Reaching
+            # here means reset_after_losses is longer than the sequence, which
+            # is a config mistake rather than something to silently invent
+            # stakes for.
+            idx = min(self.consecutive_losses, len(self.sequence) - 1)
+            wanted = self.sequence[idx]
+        elif self.cycle_loss <= 0:
+            wanted = base_stake
+        else:
+            wanted = (self.cycle_loss + self.cycle_profit) / self.assumed_net_multiplier
+        if self.max_stake_multiple is not None:
+            wanted = min(wanted, self.max_stake_multiple * base_stake)
+        return max(0.0, min(round(wanted, 2), budget_left))
+
+    def record(self, profit: float) -> None:
+        if profit < 0:
+            self.cycle_loss += -profit
+            self.consecutive_losses += 1
+            if (self.reset_after_losses is not None
+                    and self.consecutive_losses >= self.reset_after_losses):
+                # Abandon the ladder rather than climbing forever. The loss is
+                # realised; the next base bet is not chasing it.
+                self.cycle_loss = 0.0
+                self.consecutive_losses = 0
+        else:
+            self.cycle_loss = 0.0
+            self.consecutive_losses = 0
+
+
 STAKERS: dict[str, type[Staker]] = {
     "flat": FlatStake,
     "martingale": RecoveryMartingale,
     "smart_recovery": SmartRecoveryMartingale,
     "doubling": DoublingMartingale,
+    "recovery_ladder": RecoveryLadder,
 }
 
 

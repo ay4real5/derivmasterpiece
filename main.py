@@ -30,6 +30,8 @@ from deriv_bot.reporting import (
     by_selector, load_settled, pooled_matched_gap, stake_matched,
 )
 from deriv_bot.risk import RiskLimits, RiskManager
+from deriv_bot.selection import pick as select_pick
+from deriv_bot.selection import summarise as select_summary
 from deriv_bot.staking import build_staker
 from deriv_bot.study import choose as study_choose
 from deriv_bot.study import digits_from_ticks, score_legs, summarise
@@ -251,15 +253,26 @@ def cmd_ladder_risk(config: dict[str, Any], capital: float | None,
     staking = config.get("staking") or {}
     base = float(config.get("stake") or 0)
     rungs = int(staking.get("reset_after_losses") or 0)
-    if staking.get("name") != "doubling" or rungs < 1:
-        sys.exit("config staking is not a capped doubling ladder "
-                 "(need staking.name: doubling and reset_after_losses).")
+    if staking.get("name") not in ("doubling", "recovery_ladder") or rungs < 1:
+        sys.exit("config staking is not a capped ladder (need staking.name: "
+                 "doubling or recovery_ladder, plus reset_after_losses).")
+    # A recovery ladder climbs at ~2.083x, not 2x, so its worst case must be
+    # summed from the real sequence rather than assumed from base*(2**n - 1).
+    sequence = staking.get("sequence")
+    if sequence:
+        sequence = [float(x) for x in sequence]
+        base = sequence[0]
 
     if capital is None:
         capital = float(input("capital / balance to size against: ").strip())
 
-    s = ladder_summary(capital, base, rungs, win_prob, seconds_per_trade)
-    print(f"ladder: {rungs} rungs from a {base:.2f} base, win prob {win_prob:.0%}")
+    s = ladder_summary(capital, base, rungs, win_prob, seconds_per_trade,
+                       sequence=sequence)
+    kind = "recovery" if sequence else "doubling"
+    print(f"ladder: {kind}, {rungs} rungs from a {base:.2f} base, "
+          f"win prob {win_prob:.0%}")
+    if sequence:
+        print("  sequence: " + ", ".join(f"{x:g}" for x in sequence))
     print(f"capital: {capital:,.2f}")
     print()
     print(f"one full ladder costs      {s['ladder_cost']:,.2f} "
@@ -272,7 +285,8 @@ def cmd_ladder_risk(config: dict[str, Any], capital: float | None,
     print()
     print("base stake for a chosen risk per ladder:")
     for pct in (0.05, 0.10, 0.15, 0.20):
-        print(f"  {pct:.0%} of capital -> base <= {max_base_for_risk(capital, rungs, pct):.2f}")
+        print(f"  {pct:.0%} of capital -> base <= "
+              f"{max_base_for_risk(capital, rungs, pct, sequence):.2f}")
     print()
     print("Rarity per cycle is not rarity per day: 1-in-128 per cycle becomes")
     print("several per day once the bot runs unattended.")
@@ -681,6 +695,10 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
     category_rr = RoundRobin(list(CATEGORY_LEGS))
     symbol_rr = RoundRobin(symbols)
     study_cfg = dict(st_cfg.get("study", {}))
+    selection_mode = str((st_cfg.get("selection") or {}).get("mode", "global_best")).lower()
+    if selection_mode not in ("global_best", "rotation"):
+        sys.exit(f"scan_trade.selection.mode must be 'global_best' or 'rotation', "
+                 f"got {selection_mode!r}")
 
     risk = RiskManager(RiskLimits(**config["risk"]))
     journal = TradeJournal(config.get("journal_path", "trade_journal.csv"))
@@ -744,39 +762,90 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
                     f"(edge {overall_best['edge_pct']:.2f}%) — not necessarily this cycle's pick"
                 )
 
-                category = category_rr.next()
-                symbol = symbol_rr.next()
-                legs = CATEGORY_LEGS[category]
-                cell = [r for r in results if r["symbol"] == symbol
-                       and (r["contract_type"], r["barrier"]) in legs]
-                if not cell:
-                    print(f"{category} not offered on {symbol} this cycle — skipping")
-                    elapsed = time.monotonic() - cycle_start
-                    if elapsed < interval:
-                        await asyncio.sleep(interval - elapsed)
-                    continue
-                best = min(cell, key=lambda r: r["edge_pct"])
-                selector = "rotation"
-                barrier_desc = "" if best["barrier"] is None else f":{best['barrier']}"
-                print(
-                    f"this cycle's turn: {category} on {symbol} -> picked "
-                    f"{best['contract_type']}{barrier_desc} (edge {best['edge_pct']:.2f}%, "
-                    f"win prob {best['win_prob']:.0%})"
-                )
+                if selection_mode == "global_best":
+                    # Stage 1 best-per-symbol, stage 2 best-of-those. The old
+                    # round-robin quoted all 60 then threw away 59: measured
+                    # across 1,669 trades it paid a mean 2.967% edge while
+                    # 2.25% was quoted in the same cycle, 44.4% of trades
+                    # going out at 3.75-3.80% purely because it was that
+                    # category's turn.
+                    best, stage1 = select_pick(results)
+                    if best is None:
+                        print("nothing quoted this cycle — skipping")
+                        elapsed = time.monotonic() - cycle_start
+                        if elapsed < interval:
+                            await asyncio.sleep(interval - elapsed)
+                        continue
+                    selector = "global-best"
+                    symbol = best["symbol"]
+                    category = next((c for c, legs in CATEGORY_LEGS.items()
+                                     if (best["contract_type"], best["barrier"]) in legs),
+                                    "unknown")
+                    barrier_desc = "" if best["barrier"] is None else f":{best['barrier']}"
+                    print(select_summary(stage1, best))
+                    print(
+                        f"picked cheapest of {len(stage1)} symbols: {symbol} "
+                        f"{best['contract_type']}{barrier_desc} "
+                        f"(edge {best['edge_pct']:.2f}%, win prob {best['win_prob']:.0%})"
+                    )
+                else:
+                    category = category_rr.next()
+                    symbol = symbol_rr.next()
+                    legs = CATEGORY_LEGS[category]
+                    cell = [r for r in results if r["symbol"] == symbol
+                           and (r["contract_type"], r["barrier"]) in legs]
+                    if not cell:
+                        print(f"{category} not offered on {symbol} this cycle — skipping")
+                        elapsed = time.monotonic() - cycle_start
+                        if elapsed < interval:
+                            await asyncio.sleep(interval - elapsed)
+                        continue
+                    best = min(cell, key=lambda r: r["edge_pct"])
+                    selector = "rotation"
+                    barrier_desc = "" if best["barrier"] is None else f":{best['barrier']}"
+                    print(
+                        f"this cycle's turn: {category} on {symbol} -> picked "
+                        f"{best['contract_type']}{barrier_desc} (edge {best['edge_pct']:.2f}%, "
+                        f"win prob {best['win_prob']:.0%})"
+                    )
 
                 if study_cfg.get("enabled"):
-                    studied, selector = await _study_pick(
-                        api, study_cfg, results, symbol, legs,
+                    # The study still RUNS in both modes - the tick review
+                    # before every stake, deeper after a loss, is wanted - but
+                    # it may only replace the pick under `rotation`.
+                    #
+                    # Under `global_best` it must not: the pick is already the
+                    # cheapest quoted margin, which is a fact, and overriding
+                    # it with the best of 60 noisy win-rate estimates is what
+                    # measured 10.89% WORSE than abstaining, stake-matched.
+                    # Letting the study override here would hand back the
+                    # entire reason for choosing globally.
+                    study_legs = legs if selection_mode == "rotation" else list(candidates)
+                    studied, study_selector = await _study_pick(
+                        api, study_cfg, results, symbol, study_legs,
                         after_loss=last_trade_lost,
                         symbols=symbols, candidates=candidates,
                     )
-                    if studied is not None:
-                        best = studied
-                        barrier_desc = "" if best["barrier"] is None else f":{best['barrier']}"
+                    if selection_mode == "rotation":
+                        selector = study_selector
+                        if studied is not None:
+                            best = studied
+                            barrier_desc = ("" if best["barrier"] is None
+                                            else f":{best['barrier']}")
+                            print(
+                                f"study overrode the rotation -> {best['symbol']} "
+                                f"{best['contract_type']}{barrier_desc} "
+                                f"(edge {best['edge_pct']:.2f}%)"
+                            )
+                    elif studied is not None:
+                        studied_desc = ("" if studied["barrier"] is None
+                                        else f":{studied['barrier']}")
                         print(
-                            f"study overrode the rotation -> {best['symbol']} "
-                            f"{best['contract_type']}{barrier_desc} "
-                            f"(edge {best['edge_pct']:.2f}%)"
+                            f"study would have picked {studied['symbol']} "
+                            f"{studied['contract_type']}{studied_desc} "
+                            f"(edge {studied['edge_pct']:.2f}%) - NOT taken; "
+                            f"selection.mode=global_best ranks on quoted edge. "
+                            f"Compare the two with `study-report`."
                         )
 
                 # Real quoted net multiplier, not the backtester's approximation —

@@ -21,16 +21,38 @@ unattended running produces. Rarity per cycle is not rarity per day.
 from __future__ import annotations
 
 
-def ladder_cost(base: float, rungs: int) -> float:
-    """Cost of a ladder that loses every rung: base * (2**rungs - 1)."""
+def ladder_cost(base: float, rungs: int,
+                sequence: list[float] | None = None) -> float:
+    """Cost of a ladder that loses every rung.
+
+    `base * (2**rungs - 1)` only holds for a DOUBLING ladder. A recovery
+    ladder (3, 3.25, 6.77, 14.10, ...) climbs at ~2.083x, so the doubling
+    formula would understate its worst case. Pass the actual `sequence` and
+    it is summed instead of assumed - the worst-case number is the one
+    everything else here is derived from, so it should never be guessed.
+    """
+    if sequence:
+        return float(sum(sequence[:rungs] if rungs else sequence))
     return base * (2 ** rungs - 1)
 
 
-def max_base_for_risk(capital: float, rungs: int, risk_fraction: float) -> float:
-    """Largest base stake keeping one full ladder within `risk_fraction`."""
+def max_base_for_risk(capital: float, rungs: int, risk_fraction: float,
+                      sequence: list[float] | None = None) -> float:
+    """Largest base stake keeping one full ladder within `risk_fraction`.
+
+    With an explicit `sequence`, the ladder is scaled as a whole: the answer
+    is the base that shrinks the WHOLE ladder to the target, not just the
+    first rung.
+    """
     if capital <= 0 or rungs < 1:
         return 0.0
-    return capital * risk_fraction / (2 ** rungs - 1)
+    target = capital * risk_fraction
+    if sequence:
+        total = sum(sequence[:rungs] if rungs else sequence)
+        if total <= 0:
+            return 0.0
+        return sequence[0] * target / total
+    return target / (2 ** rungs - 1)
 
 
 def wipeout_every_n_trades(rungs: int, win_prob: float = 0.5) -> float:
@@ -46,8 +68,9 @@ def wipeout_every_n_trades(rungs: int, win_prob: float = 0.5) -> float:
 
 
 def summarise(capital: float, base: float, rungs: int,
-              win_prob: float = 0.5, seconds_per_trade: float = 45.0) -> dict:
-    cost = ladder_cost(base, rungs)
+              win_prob: float = 0.5, seconds_per_trade: float = 45.0,
+              sequence: list[float] | None = None) -> dict:
+    cost = ladder_cost(base, rungs, sequence)
     every = wipeout_every_n_trades(rungs, win_prob)
     hours = every * seconds_per_trade / 3600.0
     per_day = 24.0 / hours if hours > 0 else 0.0
