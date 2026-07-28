@@ -397,7 +397,7 @@ def main() -> None:
             # without an alert the user only finds out by noticing the balance
             # stopped moving, which is exactly what happened.
             alert("day_complete", "info",
-                  f"{verdict} — idle until the next UTC day ({wait / 3600:.1f}h)")
+                  f"{verdict} - idle until the next UTC day ({wait / 3600:.1f}h)")
             if args.once:
                 return
             time.sleep(wait)
@@ -409,14 +409,14 @@ def main() -> None:
         # normal restart stays silent.
         if problem_open and not is_stalled(journal_path, stall_seconds)[0]:
             alert_state.pop("recovered", None)
-            alert("recovered", "info", f"trading again — balance PnL today {pnl:+.2f}")
+            alert("recovered", "info", f"trading again - balance PnL today {pnl:+.2f}")
             problem_open = False
 
         def _on_stall(age: float) -> None:
             nonlocal problem_open
             problem_open = True
             alert("stall", "problem",
-                  f"no settled trade for {age / 60:.1f} min — restarting the bot")
+                  f"no settled trade for {age / 60:.1f} min - restarting the bot")
             child = watchdog.child
             if child is not None and child.poll() is None:
                 child.terminate()  # ends run_once's stdout loop -> normal restart
@@ -441,7 +441,7 @@ def main() -> None:
             problem_open = True
             alert("crash_loop", "problem",
                   f"{len(restart_times)} restarts in {crash_loop_window / 60:.0f} min "
-                  f"— last exit {code}")
+                  f"- last exit {code}")
 
         if args.once:
             return
