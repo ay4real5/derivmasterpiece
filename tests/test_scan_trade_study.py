@@ -118,3 +118,49 @@ def test_rise_fall_legs_are_never_study_picked():
                           _quotes("R_10", legs), "R_10", legs, False)
     assert pick is None
     assert selector == "study-abstain"
+
+
+def test_deep_review_fetches_histories_concurrently():
+    """A deep review is 10 round trips; awaiting them in sequence multiplied
+    the cycle by the link latency (measured as 90-220s gaps against a 45s
+    interval). This asserts they overlap rather than queue."""
+    import asyncio as _asyncio
+
+    class _SlowAPI(_FakeAPI):
+        async def ticks_history(self, symbol, count=1000, style="ticks"):
+            await _asyncio.sleep(0.05)
+            return await super().ticks_history(symbol, count, style)
+
+    api = _SlowAPI({s: _uniform(200) for s in SYMBOLS})
+    legs = CATEGORY_LEGS["even_odd"]
+    cfg = {"enabled": True, "window": 200, "deep_window": 200, "deep_after_loss": True}
+
+    loop = _asyncio.new_event_loop()
+    try:
+        start = loop.time()
+        loop.run_until_complete(_study_pick(
+            api, cfg, _quotes("R_10", legs), "R_10", legs,
+            after_loss=True, symbols=SYMBOLS, candidates=CANDIDATES,
+        ))
+        elapsed = loop.time() - start
+    finally:
+        loop.close()
+
+    assert len(api.calls) == len(SYMBOLS)
+    # sequential would be >= 0.05 * len(SYMBOLS); concurrent stays near one hop
+    assert elapsed < 0.05 * len(SYMBOLS)
+
+
+def test_one_failing_symbol_does_not_cancel_the_others():
+    class _PartlyFailingAPI(_FakeAPI):
+        async def ticks_history(self, symbol, count=1000, style="ticks"):
+            if symbol == "R_10":
+                raise ConnectionError("no close frame received or sent")
+            return await super().ticks_history(symbol, count, style)
+
+    api = _PartlyFailingAPI({"R_25": _all_even(200)})
+    legs = CATEGORY_LEGS["even_odd"]
+    cfg = {"enabled": True, "window": 200, "deep_window": 200, "deep_after_loss": True}
+    pick, selector = _run(api, cfg, _quotes("R_25", legs), "R_25", legs, True)
+    assert selector == "study"          # R_25 still scored despite R_10 failing
+    assert pick is not None

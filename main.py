@@ -65,14 +65,29 @@ async def _study_pick(
     best_quote: dict[str, Any] | None = None
     best_strength = float("-inf")
 
-    for sym in target_symbols:
+    async def _history(sym: str) -> tuple[str, Any, Any]:
+        """Fetch one symbol's history, returning the exception rather than
+        raising it, so one bad symbol cannot cancel the whole gather."""
         try:
             resp = await api.ticks_history(sym, count=window)
-            prices = resp["history"]["prices"]
-            pip_size = int(resp["pip_size"])
+            return sym, (resp["history"]["prices"], int(resp["pip_size"])), None
         except Exception as exc:  # noqa: BLE001 — a failed study must not stop trading
-            print(f"study[{sym}]: history unavailable ({type(exc).__name__}: {exc}) — skipping")
+            return sym, None, exc
+
+    # Concurrently, not in sequence: DerivAPI.send tags each request with a
+    # req_id and resolves its own future off a shared read loop, so these are
+    # safe in parallel. A deep review is 10 of these, and awaiting them one
+    # at a time multiplied the cycle by the round-trip latency — measured as
+    # 90-220s gaps between trades on an already-flaky link, against a 45s
+    # interval.
+    fetched = await asyncio.gather(*(_history(s) for s in target_symbols))
+
+    for sym, payload, error in fetched:
+        if error is not None or payload is None:
+            print(f"study[{sym}]: history unavailable "
+                  f"({type(error).__name__}: {error}) — skipping")
             continue
+        prices, pip_size = payload
 
         digits = digits_from_ticks(prices, pip_size)
         scored = score_legs(digits, target_legs)
