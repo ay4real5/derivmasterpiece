@@ -763,12 +763,10 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
                 )
 
                 if selection_mode == "global_best":
-                    # Stage 1 best-per-symbol, stage 2 best-of-those. The old
-                    # round-robin quoted all 60 then threw away 59: measured
-                    # across 1,669 trades it paid a mean 2.967% edge while
-                    # 2.25% was quoted in the same cycle, 44.4% of trades
-                    # going out at 3.75-3.80% purely because it was that
-                    # category's turn.
+                    # Stage 1 best-per-symbol, stage 2 best-of-those. Kept
+                    # available, but NOT the default: it concentrates every
+                    # trade on whichever symbol/leg is cheapest, which in
+                    # practice was R_10 DIGITOVER in 200 of 200 cycles.
                     best, stage1 = select_pick(results)
                     if best is None:
                         print("nothing quoted this cycle — skipping")

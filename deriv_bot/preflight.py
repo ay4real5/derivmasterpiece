@@ -127,6 +127,32 @@ def check_limits(risk_cfg: dict[str, Any], balance: float, stake: float,
     return problems
 
 
+def check_ladder_fits_daily_loss(config: dict[str, Any]) -> str | None:
+    """A ladder bigger than the daily loss cap can never finish.
+
+    Found the expensive way. With an 8-rung ladder costing 509.95 and
+    max_daily_loss set to 300, the bot took every loss on the climb -
+    3, 3.25, 6.77, 14.10, 29.36, 61.13, 127.29 = 244.90 - and then had only
+    55.10 of budget left for the 265.05 rung, so it staked 59 instead. It
+    paid the full cost of climbing and never got the recovery bet that the
+    whole structure exists for, on every single cycle.
+
+    The cap must clear one full ladder, or the ladder is not a ladder.
+    """
+    staking = config.get("staking") or {}
+    sequence = staking.get("sequence")
+    if not sequence:
+        return None  # nothing to check for flat or computed ladders
+    cost = float(sum(sequence))
+    cap = float((config.get("risk") or {}).get("max_daily_loss", 0) or 0)
+    if cap and cost > cap:
+        return (f"one full ladder costs {cost:.2f} but risk.max_daily_loss is "
+                f"{cap:.2f}. The ladder can never complete - it will take the "
+                f"losses on the way up and have the final rung truncated. "
+                f"Raise max_daily_loss above {cost:.2f}, or scale the ladder down.")
+    return None
+
+
 def check_journal_writable(path: str) -> str | None:
     """The daily loss cap depends on this file surviving restarts."""
     target = os.path.abspath(path)
@@ -166,6 +192,7 @@ def run_checks(config: dict[str, Any], demo_mode: bool, account: dict[str, Any],
         check_staking(staking_name, demo_mode, config),
         check_real_money_acknowledged(config, demo_mode),
         check_journal_writable(config.get("journal_path", "trade_journal.csv")),
+        check_ladder_fits_daily_loss(config),
     ):
         if check:
             problems.append(check)

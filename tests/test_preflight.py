@@ -148,3 +148,28 @@ def test_run_checks_still_refuses_a_real_ladder_without_the_opt_in(tmp_path):
     problems = run_checks(config, demo_mode=False, account=REAL,
                           balance=200, staking_name="doubling")
     assert any("i_accept_progressive_staking_on_real" in p for p in problems)
+
+
+def test_a_ladder_bigger_than_the_daily_cap_is_refused():
+    """Found the expensive way: an 8-rung ladder costing 509.95 with
+    max_daily_loss 300 took every loss on the climb, then had 55 left for the
+    265.05 rung. It paid to climb and never got the recovery bet."""
+    from deriv_bot.preflight import check_ladder_fits_daily_loss
+    cfg = {"staking": {"sequence": [3, 3.25, 6.77, 14.10, 29.36, 61.13, 127.29, 265.05]},
+           "risk": {"max_daily_loss": 300}}
+    problem = check_ladder_fits_daily_loss(cfg)
+    assert problem is not None
+    assert "509.95" in problem and "300" in problem
+
+
+def test_a_ladder_inside_the_daily_cap_passes():
+    from deriv_bot.preflight import check_ladder_fits_daily_loss
+    cfg = {"staking": {"sequence": [3, 3.25, 6.77, 14.10, 29.36, 61.13, 127.29, 265.05]},
+           "risk": {"max_daily_loss": 1000}}
+    assert check_ladder_fits_daily_loss(cfg) is None
+
+
+def test_ladder_check_ignores_configs_without_a_sequence():
+    from deriv_bot.preflight import check_ladder_fits_daily_loss
+    assert check_ladder_fits_daily_loss({"staking": {"name": "flat"},
+                                         "risk": {"max_daily_loss": 10}}) is None
