@@ -23,7 +23,8 @@ from deriv_bot.journal import TradeJournal
 from deriv_bot.multi_scan import (
     CATEGORY_LEGS, DEFAULT_CANDIDATES, DEFAULT_SYMBOLS, RoundRobin, parse_candidate_specs, scan_best,
 )
-from deriv_bot.preflight import account_is_demo, run_checks
+from deriv_bot.preflight import account_is_demo, check_staking, run_checks
+from deriv_bot.profiles import activate, list_profiles, load_profile, targets_real_money
 from deriv_bot.reporting import (
     by_selector, load_settled, pooled_matched_gap, stake_matched,
 )
@@ -243,6 +244,52 @@ def cmd_scan_edge(config: dict[str, Any]) -> None:
     )
 
 
+def cmd_use_profile(name: str | None) -> None:
+    """Switch the whole configuration in one reversible step."""
+    repo = os.path.dirname(os.path.abspath(__file__))
+    names = list_profiles(repo)
+    if not name:
+        print("profiles:")
+        for n in names:
+            try:
+                p = load_profile(repo, n)
+                staking = (p.get("staking") or {}).get("name", "?")
+                risk = (p.get("risk") or {}).get("max_daily_loss", "?")
+                tag = "REAL MONEY" if targets_real_money(p, n) else "demo"
+                print(f"  {n:<14} {tag:<11} staking={staking:<9} "
+                      f"stake={p.get('stake')} max_daily_loss={risk}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"  {n:<14} (unreadable: {exc})")
+        print("\nactivate with: python main.py use-profile <name>")
+        return
+
+    if name not in names:
+        sys.exit(f"no profile '{name}'. Available: {', '.join(names) or '(none)'}")
+
+    profile = load_profile(repo, name)
+    if targets_real_money(profile, name):
+        # Switching to real money is the one irreversible-feeling step here,
+        # so it gets its own confirmation rather than sharing the generic one.
+        print(f"'{name}' targets REAL MONEY.")
+        print("It still needs DEMO_MODE=false in .env, and `python main.py "
+              "preflight` should pass before you start the bot.")
+        if (profile.get("staking") or {}).get("name") != "flat":
+            print("It also enables the doubling ladder on real money. "
+                  "Run tools/martingale_sim.py with YOUR deposit first.")
+
+    _, changes = activate(repo, name)
+    print(f"\nactivated '{name}' (previous config saved to config.yaml.bak)")
+    if changes:
+        print("changed:")
+        for c in changes:
+            print(f"  {c}")
+    else:
+        print("no differences from the previous config.")
+    print("\nRestart the bot for this to take effect:")
+    print("  Stop-ScheduledTask -TaskName DerivScanTradeSupervisor; "
+          "Start-ScheduledTask -TaskName DerivScanTradeSupervisor")
+
+
 def cmd_preflight(config: dict[str, Any]) -> None:
     """Refuse-or-approve, before anything is funded.
 
@@ -457,12 +504,15 @@ async def _run_live(config: dict[str, Any], dry_run: bool) -> None:
 
     staking_cfg = dict(config.get("staking", {}))
     staking_name = staking_cfg.pop("name", "flat")
+    staking_refusal = check_staking(staking_name, demo_mode, config)
+    if staking_refusal:
+        sys.exit(staking_refusal)
     if staking_name != "flat" and not demo_mode:
-        sys.exit(
-            f"staking '{staking_name}' is DEMO ONLY and DEMO_MODE is false. "
-            "Progressive staking on a real-money account is refused by design — "
-            "see deriv_bot/staking.py and tools/martingale_sim.py."
-        )
+        # Opted in deliberately. Put the number in the log every single run,
+        # so it lives in the record rather than only in whoever remembered it.
+        print(f"REAL MONEY + progressive staking '{staking_name}' - enabled via "
+              f"i_accept_progressive_staking_on_real. See tools/martingale_sim.py "
+              f"for the bust rate at your bankroll.")
     staker = build_staker(staking_name, **staking_cfg)
 
     api = DerivAPI(config["app_id"])
@@ -603,12 +653,15 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
 
     staking_cfg = dict(config.get("staking", {}))
     staking_name = staking_cfg.pop("name", "flat")
+    staking_refusal = check_staking(staking_name, demo_mode, config)
+    if staking_refusal:
+        sys.exit(staking_refusal)
     if staking_name != "flat" and not demo_mode:
-        sys.exit(
-            f"staking '{staking_name}' is DEMO ONLY and DEMO_MODE is false. "
-            "Progressive staking on a real-money account is refused by design — "
-            "see deriv_bot/staking.py and tools/martingale_sim.py."
-        )
+        # Opted in deliberately. Put the number in the log every single run,
+        # so it lives in the record rather than only in whoever remembered it.
+        print(f"REAL MONEY + progressive staking '{staking_name}' - enabled via "
+              f"i_accept_progressive_staking_on_real. See tools/martingale_sim.py "
+              f"for the bust rate at your bankroll.")
     staker = build_staker(staking_name, **staking_cfg)
     base_stake = config["stake"]
 
@@ -794,6 +847,13 @@ def main() -> None:
     )
     sr.add_argument("--config", default="config.yaml")
 
+    up = sub.add_parser(
+        "use-profile",
+        help="List or activate a named configuration (demo-ladder, real-flat, ...)",
+    )
+    up.add_argument("name", nargs="?", default=None)
+    up.add_argument("--config", default="config.yaml")
+
     pf = sub.add_parser(
         "preflight",
         help="Check the config and account are safe before trading (esp. real money)",
@@ -817,6 +877,8 @@ def main() -> None:
         cmd_analyze(config)
     elif args.mode == "study-report":
         cmd_study_report(config)
+    elif args.mode == "use-profile":
+        cmd_use_profile(args.name)
     elif args.mode == "preflight":
         cmd_preflight(config)
     elif args.mode == "independence-test":

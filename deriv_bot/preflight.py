@@ -72,12 +72,29 @@ def check_account_type(account: dict[str, Any], demo_mode: bool) -> str | None:
     return None
 
 
-def check_staking(staking_name: str, demo_mode: bool) -> str | None:
-    if not demo_mode and staking_name != "flat":
-        return (f"staking '{staking_name}' cannot run on a real account - "
-                f"main.py refuses every non-flat staking when DEMO_MODE=false. "
-                f"Set staking.name: flat.")
-    return None
+def check_staking(staking_name: str, demo_mode: bool,
+                  config: dict[str, Any] | None = None) -> str | None:
+    """Progressive staking on a real account: allowed, but only on purpose.
+
+    This used to be an unconditional refusal. That was a seatbelt we wrote,
+    not a Deriv rule - Deriv accepts any stake size sent to it. Whether to
+    wear it is the account holder's decision, so it is now an explicit
+    opt-in rather than a wall.
+
+    The default is still refusal, because the default should be the safe one
+    and because an accidental martingale on real money is exactly the mistake
+    worth making hard. `tools/martingale_sim.py` is where the numbers behind
+    that default live.
+    """
+    if demo_mode or staking_name == "flat":
+        return None
+    if (config or {}).get("i_accept_progressive_staking_on_real") is True:
+        return None
+    return (f"staking '{staking_name}' on a REAL account needs "
+            f"'i_accept_progressive_staking_on_real: true' in config.yaml.\n"
+            f"    Run `python tools/martingale_sim.py --bankroll <your deposit> "
+            f"--base {'<your stake>'}` first - at a $200 bankroll with a $5 "
+            f"base this ladder busted 99.5% of simulated careers.")
 
 
 def check_limits(risk_cfg: dict[str, Any], balance: float, stake: float,
@@ -146,7 +163,7 @@ def run_checks(config: dict[str, Any], demo_mode: bool, account: dict[str, Any],
     problems: list[str] = []
     for check in (
         check_account_type(account, demo_mode),
-        check_staking(staking_name, demo_mode),
+        check_staking(staking_name, demo_mode, config),
         check_real_money_acknowledged(config, demo_mode),
         check_journal_writable(config.get("journal_path", "trade_journal.csv")),
     ):

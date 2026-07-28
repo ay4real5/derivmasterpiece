@@ -1,0 +1,96 @@
+# REAL MONEY, flat stakes. Sized for a ~200 deposit: 1.00 stake,
+# 20.00 daily loss cap (10%). Run `python main.py preflight` first.
+i_understand_real_money: true
+
+# Copy to config.yaml and edit. Nothing sensitive belongs in this file —
+# the API token goes in .env instead (see .env.example).
+
+# masterpiece_bot app registered at developers.deriv.com/dashboard
+app_id: 33ULSRYkmDK8Y515CmE1l
+symbol: R_100        # Volatility 100 Index — a common Digits-trading symbol
+stake: 1.00
+currency: USD
+backtest_ticks: 5000  # how many historical ticks `backtest` pulls
+
+scan_trade:
+  # interval_seconds: 45      # cycle cadence (default 45s, not 30)
+  study:
+    # Study recent digit history before each stake instead of trading purely
+    # on rotation + cheapest quoted margin.
+    enabled: true
+    window: 200               # digits scored on a normal cycle (1 extra API call)
+    deep_window: 1000         # after a LOSS, look at this many instead
+    deep_after_loss: true     # after a loss, score EVERY symbol, not just the
+                              # rotated one (~10 API calls — the deliberate
+                              # "look harder after a loss" path)
+    min_z: 2.0                # abstain unless the observed vs theoretical gap
+                              # clears this many standard errors (~95%). Lower
+                              # it and the bot starts chasing noise; that is the
+                              # whole failure mode this guards against.
+    mode: momentum            # momentum = back what is over-performing,
+                              # reversion = back what is "due"
+    # Expect frequent abstentions. Deriv's digits have passed every
+    # independence test in this repo, and on an independent stream abstaining
+    # is the correct answer. Check with `study-report` and `independence-test`.
+
+staking:
+  # The 5,10,20,40,80,160,320 ladder, wrapping back to 5 after 7 losses.
+  # This runs on DEMO here; it can also run on a real account, but only if
+  # `i_accept_progressive_staking_on_real: true` is set below - see the
+  # bust-rate numbers there before deciding.
+  #
+  # Switch profiles instead of hand-editing: `python main.py use-profile`
+  name: flat                   # every bet is `stake`, no progression
+
+strategy:
+  name: low_edge             # digit_frequency | even_odd_frequency | streak_reversal | low_edge
+  every: 15                   # bet every N ticks (~2s/tick, so ~1 trade per 30s)
+  contract_type: DIGITOVER     # per scan-edge: 2.17% margin, tied for cheapest
+  barrier: 0
+  # other strategies' params: digit_frequency/even_odd_frequency take
+  # window + threshold (+ over_under_barrier for digit_frequency);
+  # streak_reversal takes streak_len + over_under_barrier. Unsupported keys
+  # for the chosen strategy raise a TypeError — swap the block when you
+  # change name.
+
+risk:
+  max_daily_loss: 20.0      # stop -1000 — the real stop for a martingale session
+  max_consecutive_losses: 20  # high on purpose: consecutive losses are expected/fine with martingale;
+                               # the $1000 daily-loss cap is what actually protects the session
+  max_trades: 100000            # effectively unlimited — max_daily_loss/target_profit are the real stops
+  target_profit: 20.0       # stop (happily) +1000 — symmetric with the -1000 stop.
+                              # Symmetric bounds are NOT an even bet: every contract
+                              # carries a 2.25-3.75% house edge, so -1000 is the more
+                              # likely of the two to arrive first.
+
+journal_path: trade_journal.csv
+
+alerts:
+  # The supervisor writes events here; tools/alert_watcher.ps1 runs in the
+  # logged-in session and toasts them. Two processes because the supervisor
+  # runs S4U in session 0, which has no desktop and cannot toast at all.
+  enabled: true
+  file: alerts.jsonl
+  stall_seconds: 300          # no settled trade for this long => stalled, restart it.
+                              # Generous on purpose: real gaps reach ~94s, and a
+                              # cycle is skipped when a category is not offered.
+  cooldown_seconds: 900       # per event type, so one outage is one toast
+  crash_loop_restarts: 3      # this many restarts inside the window below =>
+  crash_loop_window_seconds: 600   # self-healing is failing, worth interrupting for
+  # Ordinary drops that recover in ~5s deliberately produce NO alert. They
+  # happen about twice an hour and cost nothing; alerting on them would train
+  # you to ignore the channel.
+
+supervisor:
+  # 'continue' = after the bot hits target_profit, relaunch immediately and
+  # keep trading back to back instead of banking the win and waiting for the
+  # next UTC day. Consequence: the +1000 target never actually banks
+  # anything, so -1000 (max_daily_loss) becomes the only outcome that ends a
+  # day. Set to 'stop' to bank at the target instead.
+  on_target: stop
+
+  # null = no day-level profit cap; each SESSION banks at risk.target_profit
+  # (RiskManager measures from process start) and then waits for the next UTC
+  # day. Set a number here to also cap the whole day's profit.
+  # The day-level LOSS backstop (risk.max_daily_loss) always applies.
+  day_target_profit: null

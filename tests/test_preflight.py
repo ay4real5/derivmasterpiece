@@ -123,3 +123,28 @@ def test_is_virtual_still_honoured_if_it_ever_returns():
     from deriv_bot.preflight import account_is_demo
     assert account_is_demo({"is_virtual": True}) is True
     assert account_is_demo({"is_virtual": False}) is False
+
+
+def test_martingale_on_real_is_now_an_opt_in_not_a_wall():
+    # it is the account holder's decision; the default stays safe
+    assert check_staking("doubling", demo_mode=False, config={}) is not None
+    assert check_staking("doubling", demo_mode=False,
+                         config={"i_accept_progressive_staking_on_real": True}) is None
+
+
+def test_run_checks_accepts_a_real_ladder_config_when_opted_in(tmp_path):
+    config = {"risk": {"max_daily_loss": 20}, "stake": 2,
+              "journal_path": str(tmp_path / "j.csv"),
+              "i_understand_real_money": True,
+              "i_accept_progressive_staking_on_real": True}
+    assert run_checks(config, demo_mode=False, account=REAL,
+                      balance=200, staking_name="doubling") == []
+
+
+def test_run_checks_still_refuses_a_real_ladder_without_the_opt_in(tmp_path):
+    config = {"risk": {"max_daily_loss": 20}, "stake": 2,
+              "journal_path": str(tmp_path / "j.csv"),
+              "i_understand_real_money": True}
+    problems = run_checks(config, demo_mode=False, account=REAL,
+                          balance=200, staking_name="doubling")
+    assert any("i_accept_progressive_staking_on_real" in p for p in problems)

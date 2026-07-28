@@ -8,3 +8,5 @@ trade_journal.csv
 alerts.jsonl
 .venv/
 venv/
+alerts.jsonl
+config.yaml.bak

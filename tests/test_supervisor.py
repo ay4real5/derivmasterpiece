@@ -287,3 +287,21 @@ def test_ordinary_failures_are_not_treated_as_fatal_config():
         "scan returned no quotes (3/3) - first error: ConnectionClosedError")
     assert not is_fatal_config_error("Risk manager stopped the bot: max daily loss reached")
     assert not is_fatal_config_error("Bought R_10 DIGITEVEN stake=5.00")
+
+
+def test_flat_simulation_differs_from_the_ladder():
+    """The comparison the ladder's bust rate needed: same inputs, same seed,
+    only the staking rule differs. Flat is not safe either - it busts too,
+    just far more slowly (830 median bets vs 45)."""
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "tools"))
+    from martingale_sim import simulate
+
+    common = dict(trials=200, max_bets=2000, bankroll=200.0, base=5.0,
+                  win_prob=0.5, net_win_mult=0.954)
+    ladder = simulate(**common, flat=False)
+    flat = simulate(**common, flat=True)
+
+    assert ladder["ruin_rate"] > flat["ruin_rate"]        # ladder busts more often
+    assert flat["median_bets_to_ruin"] > ladder["median_bets_to_ruin"]  # but flat busts too
