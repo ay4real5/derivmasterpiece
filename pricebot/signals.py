@@ -163,9 +163,16 @@ STRATEGIES: dict[str, type[Strategy]] = {
 
 
 def build_strategy(name: str, **kwargs: Any) -> Strategy:
+    # pdf_rise_fall lives in its own module and imports Signal from here, so
+    # it is resolved lazily rather than at import time - registering it at the
+    # top of this file would be a circular import.
+    if name == "pdf_rise_fall":
+        from .pdf_strategy import PdfRiseFall
+        return PdfRiseFall(**kwargs)
     try:
         cls = STRATEGIES[name]
     except KeyError:
+        choices = sorted(STRATEGIES) + ["pdf_rise_fall"]
         raise ValueError(
-            f"unknown strategy '{name}' - choices: {sorted(STRATEGIES)}") from None
+            f"unknown strategy '{name}' - choices: {sorted(choices)}") from None
     return cls(**kwargs)

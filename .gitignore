@@ -17,3 +17,6 @@ daily_cache/
 hourly_cache/
 scratch_*.json
 scratch_*.py
+risefall_journal.csv
+risefall_live.log
+config.risefall.yaml

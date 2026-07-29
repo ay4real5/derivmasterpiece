@@ -35,7 +35,7 @@ from typing import Any
 from deriv_bot.api import DerivAPI
 from deriv_bot.journal import TradeJournal
 
-from .instruments import build_proposal, stake_for
+from .instruments import INSTRUMENTS, RISE_FALL, build_proposal, stake_for
 from .signals import build_strategy
 from .symbol_cost import move_for_hold, realised_vol
 
@@ -55,6 +55,14 @@ class Session:
         self.cfg = config
         self.journal = journal
         pb = config.get("pricebot", {})
+        # Which product expresses the forecast. Multipliers have no expiry and
+        # are closed by their own orders; Rise/Fall is all-or-nothing at a
+        # deadline, so for it the horizon IS the trade and none of the
+        # take-profit machinery below applies.
+        self.instrument: str = str(pb.get("instrument", "multiplier"))
+        if self.instrument not in INSTRUMENTS:
+            raise ValueError(f"unknown instrument '{self.instrument}' - "
+                             f"choices: {list(INSTRUMENTS)}")
         self.symbols: list[str] = list(pb.get("symbols") or [])
         self.granularity: int = int(pb.get("granularity", 60))
         self.hold_seconds: float = float(pb.get("target_hold_seconds", 600))
@@ -131,22 +139,29 @@ class Session:
             self._log(f"{symbol}: vol {vol:.1%} - no signal")
             return
 
-        # The chosen hold time decides the target, not the other way round.
-        target = move_for_hold(self.hold_seconds, vol)
-        signal.expected_move_pct = target
-        try:
-            allowed = await self._allowed_multipliers(symbol)
-        except Exception as exc:  # noqa: BLE001
-            self._log(f"{symbol}: multiplier range unavailable ({type(exc).__name__})")
-            return
-        if not allowed:
-            self._log(f"{symbol}: no multipliers offered, skipping")
-            return
+        if self.instrument == RISE_FALL:
+            # No take-profit to size and no leverage to choose: the contract
+            # pays on direction at a deadline the STRATEGY set, so overriding
+            # the horizon here would silently change what was backtested.
+            target = signal.expected_move_pct
+            allowed: tuple[int, ...] = ()
+        else:
+            # The chosen hold time decides the target, not the other way round.
+            target = move_for_hold(self.hold_seconds, vol)
+            signal.expected_move_pct = target
+            try:
+                allowed = await self._allowed_multipliers(symbol)
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"{symbol}: multiplier range unavailable ({type(exc).__name__})")
+                return
+            if not allowed:
+                self._log(f"{symbol}: no multipliers offered, skipping")
+                return
 
         params = build_proposal(
-            signal, "multiplier", symbol,
+            signal, self.instrument, symbol,
             stake_for(signal, self.stake, self.max_stake),
-            allowed_multipliers=allowed,
+            allowed_multipliers=allowed or None,
             commission=self.commissions.get(symbol, 0.0),
         )
         if params is None:
@@ -165,20 +180,36 @@ class Session:
         cid = bought["buy"]["contract_id"]
         self.open[symbol] = cid
         self.opened += 1
-        lo = proposal.get("limit_order", {})
-        self._log(
-            f"OPEN    {symbol} {params['contract_type']} x{params['multiplier']} "
-            f"stake {params['amount']:.2f} comm {proposal.get('commission')} | "
-            f"target {target:.4%} (~{self.hold_seconds/60:.0f}m) "
-            f"TP {lo.get('take_profit', {}).get('order_amount')} "
-            f"SL {lo.get('stop_loss', {}).get('order_amount')} | {signal.reason}"
-        )
+        if self.instrument == RISE_FALL:
+            # Payout is the number that matters here - it sets the break-even
+            # win rate at stake/payout, so it is logged on every trade rather
+            # than assumed constant.
+            payout = float(proposal.get("payout") or 0.0)
+            stake_paid = float(params["amount"])
+            be = (stake_paid / payout) if payout else float("nan")
+            self._log(
+                f"OPEN    {symbol} {params['contract_type']} "
+                f"stake {stake_paid:.2f} payout {payout:.2f} "
+                f"({payout/stake_paid:.4f}x, break-even {be:.1%}) "
+                f"for {params['duration']}{params['duration_unit']} | {signal.reason}"
+            )
+        else:
+            lo = proposal.get("limit_order", {})
+            self._log(
+                f"OPEN    {symbol} {params['contract_type']} x{params['multiplier']} "
+                f"stake {params['amount']:.2f} comm {proposal.get('commission')} | "
+                f"target {target:.4%} (~{self.hold_seconds/60:.0f}m) "
+                f"TP {lo.get('take_profit', {}).get('order_amount')} "
+                f"SL {lo.get('stop_loss', {}).get('order_amount')} | {signal.reason}"
+            )
         asyncio.create_task(self._watch(symbol, cid))
 
     async def run(self, seconds: float) -> None:
         deadline = time.monotonic() + seconds
-        self._log(f"session start | symbols={self.symbols} strategy={self.strategy.name} "
-                  f"stake={self.stake} hold~{self.hold_seconds/60:.0f}m "
+        hold = ("expiry set by strategy" if self.instrument == RISE_FALL
+                else f"hold~{self.hold_seconds/60:.0f}m")
+        self._log(f"session start | {self.instrument} | symbols={self.symbols} "
+                  f"strategy={self.strategy.name} stake={self.stake} {hold} "
                   f"candles={self.granularity}s")
         while time.monotonic() < deadline:
             await asyncio.gather(*(self._consider(s) for s in self.symbols))

@@ -5,6 +5,44 @@ Even/Odd) built against Deriv's official WebSocket API. Built for
 backtesting and demo-account trading first — going live with real money is
 an explicit, separate step you take on purpose.
 
+## What is in this repo now
+
+Three bots and two research reports. All on demo.
+
+| | config | supervisor | journal | log |
+|---|---|---|---|---|
+| **Digit bot** (Over/Under, Even/Odd) | `config.yaml` | `tools/supervisor.py` | `trade_journal.csv` | `scan_trade_live.log` |
+| **Rise/Fall bot** (PDF strategy) | `config.risefall.yaml` | `tools/risefall_supervisor.py` | `risefall_journal.csv` | `risefall_live.log` |
+| **Multiplier pricebot** | `config.pricebot.yaml` | run manually | `pricebot_journal.csv` | — |
+
+Install the Rise/Fall bot so it survives logoff and reboot — **elevated
+PowerShell required**, the same as the digit bot:
+
+```powershell
+.\tools\install_risefall_task.ps1              # install and start
+.\tools\install_risefall_task.ps1 -Uninstall   # remove
+Get-Content risefall_live.log -Tail 20 -Wait   # watch it
+```
+
+### The two reports, and what they concluded
+
+- **[TICK_ANALYSIS.md](TICK_ANALYSIS.md)** — 260 statistical tests on 864,000
+  ticks across ten synthetic indices. Zero survive correction. The synthetic
+  price feed is a pure random walk, resolved at a sensitivity **7x finer**
+  than the smallest edge that could pay for itself. No rule computed from past
+  prices can work on these symbols; that is arithmetic, not pessimism.
+- **[REAL_MARKETS.md](REAL_MARKETS.md)** — real markets *do* have a genuine
+  edge: day-ahead volatility persistence, silver r=+0.61, confirmed by two
+  independent estimators. But the cheapest instrument that can express it
+  charges **16.4%** and the edge is worth about **16.2%**. Deriv has priced it
+  at approximately its own value.
+
+**So the Rise/Fall bot is running as a measurement, not as an expected
+money-maker.** Its own backtest returned 49.86% over 15,817 trades against a
+52.0% break-even. It stakes flat, caps the day's loss, and journals every
+trade with the payout multiple and break-even rate on it, so what it actually
+does stays checkable rather than assumed.
+
 ## Read this first
 
 - **Digits contracts have a built-in payout margin (house edge).** No
