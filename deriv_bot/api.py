@@ -236,6 +236,44 @@ class DerivAPI:
         ordered = [by_epoch[e] for e in sorted(by_epoch)]
         return ordered[-count:]
 
+    async def tick_history(self, symbol: str, count: int = 100000,
+                           page_pause: float = 0.15) -> list[tuple[int, float]]:
+        """(epoch, price) ticks, paged past the 1000-per-request cap.
+
+        Raw ticks, not candles: the statistical question is whether one tick
+        predicts the next, and a candle has already averaged that away. The
+        1HZ symbols emit one tick a second, so 100,000 ticks is roughly 28
+        hours of continuous data per symbol.
+
+        Same paging contract as `candle_history` - oldest first, deduplicated
+        by epoch, stops when a page is empty or the boundary stops moving.
+        """
+        by_epoch: dict[int, float] = {}
+        end: str = "latest"
+        while len(by_epoch) < count:
+            resp = await self.send({
+                "ticks_history": symbol,
+                "count": min(1000, count),
+                "end": end,
+                "style": "ticks",
+            })
+            hist = resp.get("history") or {}
+            times, prices = hist.get("times") or [], hist.get("prices") or []
+            if not times or not prices:
+                break
+            before = len(by_epoch)
+            for t, pr in zip(times, prices):
+                try:
+                    by_epoch[int(t)] = float(pr)
+                except (TypeError, ValueError):
+                    continue
+            if len(by_epoch) == before:
+                break
+            end = str(min(by_epoch))
+            if page_pause:
+                await asyncio.sleep(page_pause)
+        return [(e, by_epoch[e]) for e in sorted(by_epoch)][-count:]
+
     async def contracts_for(self, symbol: str, currency: str = "USD") -> dict[str, Any]:
         """Every contract type Deriv actually offers on `symbol`.
 

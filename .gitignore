@@ -10,3 +10,6 @@ alerts.jsonl
 venv/
 alerts.jsonl
 config.yaml.bak
+tick_cache*/
+tick_analysis*.json
+tick_analysis*.log
