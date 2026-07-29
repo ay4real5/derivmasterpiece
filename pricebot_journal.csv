@@ -1,0 +1,4 @@
+timestamp,symbol,contract_type,barrier,stake,payout,profit,balance_after,reason,selector
+2026-07-29T10:21:12.384062+00:00,R_25,MULTUP,,26.78,,-7.49,,,pricebot
+2026-07-29T10:34:50.619171+00:00,frxXAUUSD,MULTUP,,16.74,,-0.7,,,pricebot
+2026-07-29T10:38:26.752572+00:00,R_25,MULTDOWN,,50.00,,8.62,,,pricebot

@@ -90,6 +90,22 @@ def expected_seconds_per_trade(distance: float, vol: float) -> float:
     return (distance ** 2) / (vol ** 2) * SECONDS_PER_YEAR
 
 
+def move_for_hold(hold_seconds: float, vol: float) -> float:
+    """Inverse of `expected_seconds_per_trade`: the barrier distance a walk
+    takes roughly `hold_seconds` to reach.
+
+    This is how a take-profit should be chosen. Picking a percentage out of
+    the air fixes the hold time by accident - the same 0.05% target resolves
+    in 14 minutes on EUR/USD and 14 seconds on gold, because the symbols move
+    at different speeds. Choosing the TIME and deriving the distance keeps
+    behaviour comparable across symbols, and makes the trade frequency (which
+    is what actually costs money) an explicit decision.
+    """
+    if hold_seconds <= 0 or vol <= 0:
+        return 0.0
+    return math.sqrt(hold_seconds / SECONDS_PER_YEAR) * vol
+
+
 def trades_per_day(distance: float, vol: float) -> float:
     secs = expected_seconds_per_trade(distance, vol)
     return 0.0 if secs == float("inf") else 86400.0 / secs

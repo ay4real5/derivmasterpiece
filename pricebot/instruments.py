@@ -54,7 +54,8 @@ DEFAULT_STOP_FRACTION = 0.6
 
 
 def _multiplier_orders(stake: float, signal: Signal,
-                       stop_fraction: float = DEFAULT_STOP_FRACTION) -> dict[str, float]:
+                       stop_fraction: float = DEFAULT_STOP_FRACTION,
+                       multiplier: float | None = None) -> dict[str, float]:
     """take_profit and stop_loss in ACCOUNT CURRENCY, not price terms.
 
     Deriv wants the profit and loss amounts, and derives the trigger prices
@@ -65,7 +66,8 @@ def _multiplier_orders(stake: float, signal: Signal,
     """
     if not 0 < stop_fraction < 1:
         raise ValueError("stop_fraction must be between 0 and 1")
-    take_profit = round(stake * signal.expected_move_pct * _leverage(signal), 2)
+    lev = multiplier if multiplier else _leverage(signal)
+    take_profit = round(stake * signal.expected_move_pct * lev, 2)
     stop_loss = round(take_profit * stop_fraction, 2)
     # Never at or beyond the stake: the stop-out owns that level.
     stop_loss = min(stop_loss, round(stake * 0.9, 2))
@@ -73,28 +75,46 @@ def _multiplier_orders(stake: float, signal: Signal,
             "stop_loss": max(stop_loss, 0.01)}
 
 
-def _leverage(signal: Signal) -> int:
-    """Pick the smallest valid multiplier that makes the expected move
-    meaningful without putting the stop-out inside normal noise.
+def _leverage(signal: Signal, stake: float = 1.0,
+              allowed: tuple[int, ...] | None = None,
+              commission: float = 0.0,
+              min_reward_multiple: float = 3.0) -> int:
+    """Smallest allowed multiplier whose take-profit still beats the fee.
 
-    Higher leverage means the stop-out sits closer to spot: at 400x a 0.25%
-    adverse move ends the position. So leverage is chosen from the forecast
-    rather than fixed - a small expected move needs more leverage to be worth
-    trading, a large one needs less and survives more noise.
+    `allowed` MUST come from the symbol. Deriv's ranges are per-instrument
+    and not similar: R_10 takes [400, 1000, 2000, 3000, 4000], R_25 takes
+    [160, 400, ...], R_100 takes [40, 100, ...], and every real market takes
+    [100, 200, 300, 500, 800]. A hardcoded tuple silently fitted only R_10 -
+    gold was rejected on every attempt of a live session and never traded
+    once, while R_25 worked by coincidence because 400 appears in both lists.
+
+    SMALLEST, not largest, is the point. Cost per day scales with the
+    multiplier SQUARED, because leverage pulls the stop-out closer and the
+    position dies and reopens more often. The only reason to go higher is
+    that a take-profit worth less than the commission cannot pay for itself,
+    so this climbs only until the reward clears `min_reward_multiple` fees,
+    then stops.
     """
-    if signal.expected_move_pct <= 0:
-        return VALID_MULTIPLIERS[0]
-    # Aim for the take-profit to be roughly 30% of stake.
-    wanted = 0.30 / signal.expected_move_pct
-    for m in VALID_MULTIPLIERS:
-        if m >= wanted:
+    # None means "not supplied, use the synthetic defaults"; an EMPTY tuple
+    # means "this symbol offers none" and must fail loudly. Treating the two
+    # the same is what let a hardcoded synthetic range be applied to gold.
+    options = VALID_MULTIPLIERS if allowed is None else tuple(allowed)
+    if not options:
+        raise ValueError("no allowed multipliers for this symbol")
+    options = tuple(sorted(options))
+    if signal.expected_move_pct <= 0 or commission <= 0:
+        return options[0]
+    for m in options:
+        if stake * signal.expected_move_pct * m >= min_reward_multiple * commission:
             return m
-    return VALID_MULTIPLIERS[-1]
+    return options[-1]
 
 
 def build_proposal(signal: Signal, instrument: str, symbol: str, stake: float,
                    currency: str = "USD",
-                   stop_fraction: float = DEFAULT_STOP_FRACTION) -> dict[str, Any] | None:
+                   stop_fraction: float = DEFAULT_STOP_FRACTION,
+                   allowed_multipliers: tuple[int, ...] | None = None,
+                   commission: float = 0.0) -> dict[str, Any] | None:
     """`api.proposal` kwargs for this signal, or None if it is not tradeable.
 
     Returning None rather than a zero-size order keeps "no trade" a first
@@ -118,11 +138,12 @@ def build_proposal(signal: Signal, instrument: str, symbol: str, stake: float,
     }
 
     if instrument == MULTIPLIER:
+        mult = _leverage(signal, stake, allowed_multipliers, commission)
         return {
             **base,
             "contract_type": "MULTUP" if signal.direction > 0 else "MULTDOWN",
-            "multiplier": _leverage(signal),
-            "limit_order": _multiplier_orders(stake, signal, stop_fraction),
+            "multiplier": mult,
+            "limit_order": _multiplier_orders(stake, signal, stop_fraction, mult),
         }
 
     if instrument == RISE_FALL:

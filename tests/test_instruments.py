@@ -121,3 +121,47 @@ def test_stake_scales_with_confidence_not_with_losses():
 
 def test_stake_respects_a_cap():
     assert stake_for(up(conf=1.0), 10.0, max_stake=4.0) == 4.0
+
+
+# --- per-symbol multiplier ranges ---------------------------------------
+
+def test_leverage_uses_the_symbols_own_range():
+    """Deriv's ranges are per-instrument and unlike each other. A hardcoded
+    tuple fitted only R_10: gold was rejected on every attempt of a live
+    session and never traded once, while R_25 worked by coincidence."""
+    from pricebot.instruments import _leverage
+    gold = (100, 200, 300, 500, 800)
+    m = _leverage(up(move=0.0008), stake=50.0, allowed=gold, commission=0.60)
+    assert m in gold
+
+
+def test_leverage_prefers_the_smallest_that_clears_the_fee():
+    # cost per day scales with multiplier SQUARED, so bigger is not better -
+    # it only climbs far enough for the take-profit to beat the commission
+    from pricebot.instruments import _leverage
+    allowed = (100, 200, 300, 500, 800)
+    cheap = _leverage(up(move=0.01), stake=50.0, allowed=allowed, commission=0.60)
+    dear = _leverage(up(move=0.00001), stake=50.0, allowed=allowed, commission=0.60)
+    assert cheap == 100          # a big move needs no leverage to pay
+    assert dear > cheap          # a tiny one has to climb to beat the fee
+
+
+def test_build_proposal_honours_the_allowed_range():
+    gold = (100, 200, 300, 500, 800)
+    p = build_proposal(up(move=0.0008), MULTIPLIER, "frxXAUUSD", 50.0,
+                       allowed_multipliers=gold, commission=0.60)
+    assert p["multiplier"] in gold
+
+
+def test_take_profit_matches_the_multiplier_actually_used():
+    gold = (100, 200, 300, 500, 800)
+    p = build_proposal(up(move=0.001), MULTIPLIER, "frxXAUUSD", 50.0,
+                       allowed_multipliers=gold, commission=0.60)
+    expected = round(50.0 * 0.001 * p["multiplier"], 2)
+    assert p["limit_order"]["take_profit"] == pytest.approx(expected)
+
+
+def test_an_empty_range_is_refused_not_guessed():
+    from pricebot.instruments import _leverage
+    with pytest.raises(ValueError):
+        _leverage(up(), stake=50.0, allowed=(), commission=0.6)

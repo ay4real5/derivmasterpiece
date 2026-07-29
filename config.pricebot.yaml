@@ -1,0 +1,33 @@
+# Separate from config.yaml - the digit bot is untouched and still running.
+app_id: 33ULSRYkmDK8Y515CmE1l
+currency: USD
+journal_path: pricebot_journal.csv
+
+pricebot:
+  # R_10 and R_25 are the cheapest synthetics to run multipliers on; XAUUSD
+  # is the cheapest real market that actually moves enough to trade.
+  # EUR/USD dropped: at 3.9% realised volatility it needs 14 minutes just to
+  # move far enough to cover its own commission.
+  symbols: [R_10, R_25, frxXAUUSD]
+
+  stake: 50.00
+  max_stake: 50.00
+
+  # THE IMPORTANT SETTING. The take-profit distance is derived from this, not
+  # set as a percentage - a fixed 0.05% target resolves in 14 minutes on
+  # EUR/USD and 14 seconds on gold, so choosing the percentage fixes the trade
+  # frequency by accident. Frequency is what costs money, so it is chosen
+  # explicitly here.
+  target_hold_seconds: 600      # ~10 minutes per position
+
+  # Study window should span the holding period. 20 x 60s = 20 minutes of
+  # history for a ~10 minute position. Studying 20 minutes to decide a 24-day
+  # position - which the defaults would have done on EUR/USD - is noise.
+  granularity: 60
+  poll_seconds: 20
+
+  strategy:
+    name: momentum
+    lookback: 20
+    min_move_pct: 0.0004        # ignore drift smaller than this
+    horizon_seconds: 600
