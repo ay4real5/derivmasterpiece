@@ -937,7 +937,8 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool,
         await api.close()
 
 
-def cmd_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
+def cmd_scan_trade(config: dict[str, Any], dry_run: bool = False,
+                   daily_pnl_offset: float = 0.0) -> None:
     asyncio.run(_run_scan_trade(config, dry_run, daily_pnl_offset))
 
 

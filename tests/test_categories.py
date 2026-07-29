@@ -47,3 +47,16 @@ def test_the_ladder_still_fits_the_daily_cap():
     assert ladder < cfg["risk"]["max_daily_loss"], (
         f"ladder {ladder} exceeds max_daily_loss "
         f"{cfg['risk']['max_daily_loss']} - it could never complete")
+
+
+def test_the_cli_entrypoints_accept_the_offset():
+    """Regression: the body of cmd_scan_trade was updated to pass
+    daily_pnl_offset but its signature was not, so every child crashed with
+    TypeError one second after launch and the supervisor restarted it into
+    the same crash. The crash_loop alert caught it."""
+    import inspect
+
+    import main
+    for name in ("cmd_scan_trade", "cmd_live", "_run_scan_trade", "_run_live"):
+        params = inspect.signature(getattr(main, name)).parameters
+        assert "daily_pnl_offset" in params, f"{name} cannot accept the offset"
