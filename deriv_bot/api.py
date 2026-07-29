@@ -164,6 +164,24 @@ class DerivAPI:
             "style": style,
         })
 
+    async def contracts_for(self, symbol: str, currency: str = "USD") -> dict[str, Any]:
+        """Every contract type Deriv actually offers on `symbol`.
+
+        Never called until now, which is why this bot has only ever traded
+        six contract types: `edge.py::_requests` is a hand-written list of
+        digits plus CALL/PUT. Deriv also sells Touch/No Touch, Higher/Lower,
+        Turbos, Vanillas, Multipliers and Accumulators on these symbols, none
+        of which have ever been quoted, let alone priced against the digits.
+
+        Returns each type with its permitted durations and whether it needs a
+        barrier - so a scan can be built from what the venue reports rather
+        than from an assumption about what it sells.
+        """
+        # Deliberately just the symbol: the current API rejects `currency`
+        # and `product_type` here with "Properties not allowed", unlike the
+        # legacy docs. Verified against the live endpoint.
+        return await self.send({"contracts_for": symbol})
+
     async def proposal(self, **params: Any) -> dict[str, Any]:
         return await self.send({"proposal": 1, **params})
 
