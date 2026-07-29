@@ -187,6 +187,55 @@ class DerivAPI:
         })
         return resp.get("candles") or []
 
+    async def candle_history(self, symbol: str, granularity: int = 60,
+                             count: int = 10000, page_pause: float = 0.2,
+                             on_page: Any = None) -> list[dict[str, Any]]:
+        """Candles going back further than one request allows.
+
+        Deriv caps a single `ticks_history` at 1000 candles - 17 hours at one
+        minute, which is far too little to tell a real edge from luck. Paging
+        by passing the oldest epoch back as `end` lifts that: verified to walk
+        backwards indefinitely.
+
+        Returned oldest-first, de-duplicated by epoch (page boundaries repeat
+        a candle), and truncated to `count`. Stops early when a page comes
+        back empty or fails to move the boundary, so a market with limited
+        history - or a weekend gap on gold - ends the walk rather than
+        looping.
+
+        `page_pause` is deliberate: this is the only place that issues many
+        requests in quick succession, and being rate-limited mid-research is
+        a slow way to learn about politeness.
+        """
+        by_epoch: dict[int, dict[str, Any]] = {}
+        end: str = "latest"
+        while len(by_epoch) < count:
+            resp = await self.send({
+                "ticks_history": symbol,
+                "count": min(1000, count),
+                "end": end,
+                "style": "candles",
+                "granularity": granularity,
+            })
+            page = resp.get("candles") or []
+            if not page:
+                break
+            before = len(by_epoch)
+            for c in page:
+                try:
+                    by_epoch[int(c["epoch"])] = c
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if len(by_epoch) == before:
+                break  # boundary stopped moving; no more history
+            end = str(min(by_epoch))
+            if on_page:
+                on_page(len(by_epoch))
+            if page_pause:
+                await asyncio.sleep(page_pause)
+        ordered = [by_epoch[e] for e in sorted(by_epoch)]
+        return ordered[-count:]
+
     async def contracts_for(self, symbol: str, currency: str = "USD") -> dict[str, Any]:
         """Every contract type Deriv actually offers on `symbol`.
 

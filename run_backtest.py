@@ -20,6 +20,8 @@ async def main() -> None:
     ap.add_argument("--symbols", nargs="*", default=None)
     ap.add_argument("--candles", type=int, default=5000)
     ap.add_argument("--granularity", type=int, default=60)
+    ap.add_argument("--hold", type=float, default=None,
+                    help="target hold seconds; should scale with granularity")
     args = ap.parse_args()
 
     load_dotenv()
@@ -37,8 +39,10 @@ async def main() -> None:
     await api.connect(await api.request_trading_ws_url(token, acct["account_id"]))
     try:
         for sym in symbols:
-            candles = await api.candles(sym, granularity=args.granularity,
-                                        count=args.candles)
+            print(f"fetching {args.candles} candles for {sym} ...", flush=True)
+            candles = await api.candle_history(
+                sym, granularity=args.granularity, count=args.candles)
+            print(f"  got {len(candles)} candles", flush=True)
             av = (await api.contracts_for(sym))["contracts_for"]["available"]
             rng = next((c.get("multiplier_range") for c in av
                         if c.get("contract_type") == "MULTUP"), [400])
@@ -60,18 +64,24 @@ async def main() -> None:
             res = compare(candles, strategies, stake=pb["stake"],
                           multiplier=mult, commission=comm,
                           granularity=args.granularity,
-                          target_hold_seconds=pb["target_hold_seconds"],
+                          target_hold_seconds=args.hold or pb["target_hold_seconds"],
                           vol_window=500)
-            hours = len(candles) * args.granularity / 3600
+            import datetime as _dt
+            span_h = (candles[-1]["epoch"] - candles[0]["epoch"]) / 3600 if len(candles) > 1 else 0
+            hours = span_h
             print(f"\n=== {sym}  x{mult}  commission {comm:.2f}  "
                   f"{len(candles)} candles ({hours:.0f}h) ===")
             print(f"{'strategy':<16}{'trades':>8}{'win%':>8}{'gross':>10}"
-                  f"{'fees':>9}{'NET':>10}{'vs never':>10}")
+                  f"{'g/trade':>9}{'t-stat':>8}{'fees':>9}{'NET':>10}")
             base = res["never"].net
             for name, r in res.items():
                 print(f"{name:<16}{r.count:>8}{r.win_rate*100:>7.1f}%"
-                      f"{r.gross:>10.2f}{r.commission:>9.2f}{r.net:>10.2f}"
-                      f"{r.net-base:>10.2f}")
+                      f"{r.gross:>10.2f}{r.gross_per_trade:>9.3f}"
+                      f"{r.gross_tstat:>8.2f}{r.commission:>9.2f}{r.net:>10.2f}")
+            need = res["momentum"].commission / max(1, res["momentum"].count)
+            print()
+            print(f"to break even, gross per trade must reach {need:.2f} "
+                  f"(the commission). |t| under 2 means no detectable edge at all.")
     finally:
         await api.close()
 

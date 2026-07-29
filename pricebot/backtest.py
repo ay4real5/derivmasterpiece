@@ -85,6 +85,29 @@ class Result:
         return sum(t.net for t in self.trades)
 
     @property
+    def gross_per_trade(self) -> float:
+        return self.gross / self.count if self.count else 0.0
+
+    @property
+    def gross_tstat(self) -> float:
+        """How many standard errors the average gross sits from zero.
+
+        The number that decides whether an apparent edge is real. Gross PnL
+        per trade is enormously variable - a win is roughly +TP and a loss
+        -0.6*TP - so a few hundred dollars over a few thousand trades can
+        look like a discovery and be nothing. Under about 2 there is no
+        evidence of an edge at all, and even a real one still has to clear
+        the commission, which is a separate and usually harder test.
+        """
+        if self.count < 2:
+            return 0.0
+        vals = [t.gross for t in self.trades]
+        mean = sum(vals) / len(vals)
+        var = sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)
+        se = (var / len(vals)) ** 0.5
+        return mean / se if se > 0 else 0.0
+
+    @property
     def unresolved(self) -> int:
         return sum(1 for t in self.trades if t.outcome == "unresolved")
 
