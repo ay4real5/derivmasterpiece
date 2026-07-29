@@ -82,3 +82,51 @@ def test_stopped_bot_resumes_after_day_rolls_over():
 
     rm._today = lambda: date(2024, 1, 2)
     assert rm.can_trade()
+
+
+def test_opening_daily_pnl_reduces_the_available_budget():
+    """The cap did not cap. RiskManager starts at zero in every new process
+    and the supervisor restarts on any crash, so each restart granted a fresh
+    max_daily_loss. Observed live: relaunched with the day at -521 'within
+    limits', and the day ran to -1016.38 against a 1000 cap."""
+    r = RiskManager(RiskLimits(max_daily_loss=1000, max_consecutive_losses=99,
+                               max_trades=99999), opening_daily_pnl=-900.0)
+    assert r.can_trade()
+    r.record_trade(-99.0)          # day now -999
+    assert r.can_trade()
+    r.record_trade(-2.0)           # day now -1001, past the cap
+    assert not r.can_trade()
+    assert "max daily loss" in r.stop_reason
+
+
+def test_an_offset_already_past_the_cap_stops_before_the_first_trade():
+    r = RiskManager(RiskLimits(max_daily_loss=1000, max_consecutive_losses=99,
+                               max_trades=99999), opening_daily_pnl=-1000.0)
+    assert not r.can_trade()
+
+
+def test_no_offset_behaves_exactly_as_before():
+    r = RiskManager(RiskLimits(max_daily_loss=1000, max_consecutive_losses=99,
+                               max_trades=99999))
+    assert r.daily_pnl == 0.0
+    assert r.can_trade()
+
+
+def test_a_positive_offset_carries_profit_toward_the_target():
+    r = RiskManager(RiskLimits(max_daily_loss=1000, max_consecutive_losses=99,
+                               max_trades=99999, target_profit=300),
+                    opening_daily_pnl=250.0)
+    assert r.can_trade()
+    r.record_trade(60.0)           # day now +310
+    assert not r.can_trade()
+    assert "profit target" in r.stop_reason
+
+
+def test_the_utc_rollover_clears_a_carried_offset(monkeypatch):
+    # the offset belongs to the day it was measured for; a new day is clean
+    from datetime import date as _date
+    r = RiskManager(RiskLimits(max_daily_loss=1000, max_consecutive_losses=99,
+                               max_trades=99999), opening_daily_pnl=-990.0)
+    monkeypatch.setattr(RiskManager, "_today", staticmethod(lambda: _date(2099, 1, 1)))
+    assert r.can_trade()            # rollover detected
+    assert r.daily_pnl == 0.0

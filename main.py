@@ -536,7 +536,8 @@ def cmd_analyze(config: dict[str, Any]) -> None:
     )
 
 
-async def _run_live(config: dict[str, Any], dry_run: bool) -> None:
+async def _run_live(config: dict[str, Any], dry_run: bool,
+                    daily_pnl_offset: float = 0.0) -> None:
     load_dotenv()
     token = os.environ.get("DERIV_API_TOKEN")
     demo_mode = os.environ.get("DEMO_MODE", "true").strip().lower() != "false"
@@ -547,7 +548,15 @@ async def _run_live(config: dict[str, Any], dry_run: bool) -> None:
     confirm_real_money(config, demo_mode, dry_run)
 
     strategy = _build_strategy_from_config(config)
-    risk = RiskManager(RiskLimits(**config["risk"]))
+    # Carried in by the supervisor so max_daily_loss caps the DAY, not this
+    # process. Zero when run by hand.
+    if daily_pnl_offset:
+        print(f"opening daily PnL carried over: {daily_pnl_offset:+.2f} "
+              f"(budget left before the {config['risk']['max_daily_loss']:.0f} "
+              f"stop: {abs(config['risk']['max_daily_loss']) + daily_pnl_offset:.2f})")
+    risk = RiskManager(RiskLimits(**config["risk"]), opening_daily_pnl=daily_pnl_offset)
+    if not risk.can_trade():
+        sys.exit(f"Day already past its limit ({risk.stop_reason}) - not trading.")
     journal = TradeJournal(config.get("journal_path", "trade_journal.csv"))
 
     staking_cfg = dict(config.get("staking", {}))
@@ -660,11 +669,13 @@ async def _run_live(config: dict[str, Any], dry_run: bool) -> None:
         await api.close()
 
 
-def cmd_live(config: dict[str, Any], dry_run: bool) -> None:
-    asyncio.run(_run_live(config, dry_run))
+def cmd_live(config: dict[str, Any], dry_run: bool,
+             daily_pnl_offset: float = 0.0) -> None:
+    asyncio.run(_run_live(config, dry_run, daily_pnl_offset))
 
 
-async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
+async def _run_scan_trade(config: dict[str, Any], dry_run: bool,
+                          daily_pnl_offset: float = 0.0) -> None:
     """Every cycle: quote every configured symbol x contract type, trade
     whichever quote has the smallest house margin right now, then wait out
     the rest of `interval_seconds` before scanning again. No tick stream is
@@ -692,7 +703,18 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
     # observed live picking the same symbol+contract every cycle. These two
     # independent round-robins guarantee every category and every symbol
     # gets its turn; scoring only picks the best LEG within the forced cell.
-    category_rr = RoundRobin(list(CATEGORY_LEGS))
+    # Which contract families the rotation cycles. Measured within the seven
+    # cheap symbols: over_under 2.29%, even_odd 2.30%, rise_fall 3.79% - so
+    # dropping rise_fall removes ~1.5 percentage points from a third of all
+    # trades while two families still interchange.
+    categories = list(st_cfg.get("categories") or CATEGORY_LEGS)
+    unknown = [c for c in categories if c not in CATEGORY_LEGS]
+    if unknown:
+        sys.exit(f"scan_trade.categories has unknown entries {unknown}. "
+                 f"Valid: {sorted(CATEGORY_LEGS)}")
+    if not categories:
+        sys.exit("scan_trade.categories cannot be empty.")
+    category_rr = RoundRobin(categories)
     symbol_rr = RoundRobin(symbols)
     study_cfg = dict(st_cfg.get("study", {}))
     selection_mode = str((st_cfg.get("selection") or {}).get("mode", "global_best")).lower()
@@ -700,7 +722,15 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
         sys.exit(f"scan_trade.selection.mode must be 'global_best' or 'rotation', "
                  f"got {selection_mode!r}")
 
-    risk = RiskManager(RiskLimits(**config["risk"]))
+    # Carried in by the supervisor so max_daily_loss caps the DAY, not this
+    # process. Zero when run by hand.
+    if daily_pnl_offset:
+        print(f"opening daily PnL carried over: {daily_pnl_offset:+.2f} "
+              f"(budget left before the {config['risk']['max_daily_loss']:.0f} "
+              f"stop: {abs(config['risk']['max_daily_loss']) + daily_pnl_offset:.2f})")
+    risk = RiskManager(RiskLimits(**config["risk"]), opening_daily_pnl=daily_pnl_offset)
+    if not risk.can_trade():
+        sys.exit(f"Day already past its limit ({risk.stop_reason}) - not trading.")
     journal = TradeJournal(config.get("journal_path", "trade_journal.csv"))
 
     staking_cfg = dict(config.get("staking", {}))
@@ -908,7 +938,7 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
 
 
 def cmd_scan_trade(config: dict[str, Any], dry_run: bool) -> None:
-    asyncio.run(_run_scan_trade(config, dry_run))
+    asyncio.run(_run_scan_trade(config, dry_run, daily_pnl_offset))
 
 
 def main() -> None:
@@ -938,6 +968,12 @@ def main() -> None:
     )
     st.add_argument("--config", default="config.yaml")
     st.add_argument("--dry-run", action="store_true", help="Compute the pick but never place trades")
+    st.add_argument(
+        "--daily-pnl-offset", type=float, default=0.0,
+        help="PnL the day has already realised before this process started. "
+             "The supervisor passes this so max_daily_loss caps the day "
+             "rather than resetting on every restart.",
+    )
 
     an = sub.add_parser("analyze", help="Report per-contract performance from the trade journal")
     an.add_argument("--config", default="config.yaml")
@@ -996,7 +1032,8 @@ def main() -> None:
     elif args.mode == "independence-test":
         cmd_independence_test(config)
     elif args.mode == "scan-trade":
-        cmd_scan_trade(config, dry_run=args.dry_run)
+        cmd_scan_trade(config, dry_run=args.dry_run,
+                       daily_pnl_offset=args.daily_pnl_offset)
     else:
         cmd_live(config, dry_run=args.dry_run)
 

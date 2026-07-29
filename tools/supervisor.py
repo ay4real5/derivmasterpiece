@@ -290,7 +290,7 @@ def log(line: str, stream=None) -> None:
     stream.flush()
 
 
-def run_once(config: str, log_path: str,
+def run_once(config: str, log_path: str, daily_pnl_offset: float = 0.0,
              watchdog: "StallWatchdog | None" = None) -> tuple[int, str | None]:
     """Launch one scan-trade process, streaming its output into `log_path`.
 
@@ -303,7 +303,13 @@ def run_once(config: str, log_path: str,
     `-u` matters: without it Python block-buffers stdout when it is a file,
     so a live session can run for many minutes showing nothing at all.
     """
-    cmd = [child_python(), "-u", "main.py", "scan-trade", "--config", config]
+    # Carry the day's realised PnL into the child so max_daily_loss caps the
+    # DAY. RiskManager starts at zero in every new process, and this restarts
+    # the bot on any crash or dropped socket, so without this each restart
+    # silently granted a fresh allowance - the day reached -1016 against a
+    # 1000 cap that way.
+    cmd = [child_python(), "-u", "main.py", "scan-trade", "--config", config,
+           "--daily-pnl-offset", f"{daily_pnl_offset:.2f}"]
     stop_reason: str | None = None
     fatal_config: bool = False
     with open(log_path, "a", encoding="utf-8") as out:
@@ -465,7 +471,7 @@ def main() -> None:
         started = time.monotonic()
         stop_reason = None
         try:
-            code, stop_reason = run_once(args.config, log_path, watchdog)
+            code, stop_reason = run_once(args.config, log_path, pnl, watchdog)
         except Exception as exc:  # noqa: BLE001 — a supervisor may not die
             code = -1
             log(f"launch failed: {exc!r}")

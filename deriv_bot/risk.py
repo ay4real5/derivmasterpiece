@@ -18,14 +18,35 @@ class RiskLimits:
 
 
 class RiskManager:
-    def __init__(self, limits: RiskLimits):
+    def __init__(self, limits: RiskLimits, opening_daily_pnl: float = 0.0):
+        """`opening_daily_pnl` is what the day has ALREADY lost or made before
+        this process started, and it is what makes `max_daily_loss` mean the
+        day rather than the process.
+
+        Without it the cap did not cap. This counter starts at zero in every
+        new process, and the supervisor restarts the bot on any crash or
+        dropped socket - so each restart silently handed out a fresh
+        `max_daily_loss` allowance. Observed live: the supervisor relaunched
+        with the day at -521 ("within limits"), and the day ran to -1016.38
+        against a 1000 cap while the child was only ~-495 into its own
+        budget. Enough restarts and the cap is arbitrarily large.
+
+        The supervisor now passes `day_pnl(journal, utc_today())` here, so a
+        child launched at -521 has 479 left rather than 1000.
+        `_roll_day_if_needed` still zeroes this at the UTC boundary, which is
+        correct: the offset belongs to the day it was measured for, and a
+        genuinely new day starts clean.
+        """
         self.limits = limits
-        self.daily_pnl = 0.0
+        self.daily_pnl = float(opening_daily_pnl)
         self.consecutive_losses = 0
         self.trade_count = 0
         self.stopped = False
         self.stop_reason: str | None = None
         self._day = self._today()
+        # An offset already past the limit must stop the bot before its first
+        # trade, not after one more.
+        self._check_limits()
 
     @staticmethod
     def _today() -> date:
