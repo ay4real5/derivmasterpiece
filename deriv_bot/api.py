@@ -164,6 +164,29 @@ class DerivAPI:
             "style": style,
         })
 
+    async def candles(self, symbol: str, granularity: int = 60,
+                      count: int = 1000) -> list[dict[str, Any]]:
+        """OHLC candles, for measuring realised volatility.
+
+        `ticks_history` already takes a `style`, but the candle call also
+        needs `granularity` (seconds per candle) and returns its data under
+        `candles` rather than `history.prices` - different enough to be worth
+        its own method rather than a footgun in the caller.
+
+        Volatility is what decides which symbol is cheapest to trade
+        multipliers on, and it has to be measured: the synthetic names are
+        accurate (R_10 measures 10.1%) but EUR/USD measures 3.9% against a
+        textbook 8%.
+        """
+        resp = await self.send({
+            "ticks_history": symbol,
+            "count": count,
+            "end": "latest",
+            "style": "candles",
+            "granularity": granularity,
+        })
+        return resp.get("candles") or []
+
     async def contracts_for(self, symbol: str, currency: str = "USD") -> dict[str, Any]:
         """Every contract type Deriv actually offers on `symbol`.
 

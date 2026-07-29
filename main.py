@@ -36,6 +36,8 @@ from deriv_bot.staking import build_staker
 from deriv_bot.study import choose as study_choose
 from deriv_bot.study import digits_from_ticks, score_legs, summarise
 from deriv_bot.strategy import STRATEGIES, Strategy, build_strategy
+from pricebot.symbol_cost import rank as rank_symbols
+from pricebot.symbol_cost import realised_vol
 
 MIN_STAKE = 0.35  # Deriv's minimum contract stake
 
@@ -336,6 +338,74 @@ def cmd_use_profile(name: str | None) -> None:
     print("\nRestart the bot for this to take effect:")
     print("  Stop-ScheduledTask -TaskName DerivScanTradeSupervisor; "
           "Start-ScheduledTask -TaskName DerivScanTradeSupervisor")
+
+
+def cmd_symbol_cost(config: dict[str, Any], symbols: list[str] | None,
+                    stake: float, granularity: int) -> None:
+    """Rank symbols by what trading multipliers on them actually costs per day.
+
+    Not by commission. For a driftless walk the take-profit/stop-loss bracket
+    is a fair bet, so expected PnL per trade is exactly minus the commission -
+    identical for every symbol. What differs is how OFTEN you pay it, and a
+    walk reaches a barrier `d` away in time ~ d^2/sigma^2 where d = 1/multiplier:
+
+        cost per day ~ commission x volatility^2 x multiplier^2
+
+    Two terms squared, so the spread is large and ranking on commission alone
+    gets it wrong - gold has the cheapest commission and still costs more per
+    day than EUR/USD, which moves a quarter as fast.
+    """
+    load_dotenv()
+    token = os.environ.get("DERIV_API_TOKEN")
+    if not token:
+        sys.exit("Set DERIV_API_TOKEN in a .env file first (copy .env.example).")
+    symbols = symbols or list(config.get("scan_trade", {}).get("symbols") or DEFAULT_SYMBOLS)
+
+    async def _measure(api: Any, sym: str) -> dict[str, Any]:
+        row: dict[str, Any] = {"symbol": sym}
+        try:
+            candles = await api.candles(sym, granularity=granularity, count=1000)
+            row["vol"] = realised_vol(candles, granularity)
+            row["candles"] = len(candles)
+        except Exception as exc:  # noqa: BLE001 - one bad symbol must not stop the scan
+            return {**row, "unavailable": f"candles: {type(exc).__name__}"}
+        # cheapest leverage Deriv will actually accept for this symbol
+        for mult in (100, 150, 200, 300, 400):
+            try:
+                p = (await api.proposal(
+                    contract_type="MULTUP", underlying_symbol=sym, amount=stake,
+                    basis="stake", currency="USD", multiplier=mult))["proposal"]
+                row["multiplier"] = mult
+                row["commission"] = float(p.get("commission") or 0)
+                return row
+            except Exception:  # noqa: BLE001 - try the next leverage
+                continue
+        return {**row, "unavailable": "no accepted multiplier"}
+
+    async def _run() -> list[dict[str, Any]]:
+        api = DerivAPI(config["app_id"])
+        accounts = await api.list_accounts(token)
+        acct = next((a for a in accounts if a.get("account_type") == "demo"), accounts[0])
+        await api.connect(await api.request_trading_ws_url(token, acct["account_id"]))
+        try:
+            return list(await asyncio.gather(*(_measure(api, s) for s in symbols)))
+        finally:
+            await api.close()
+
+    rows = rank_symbols(asyncio.run(_run()))
+    print(f"MULTUP, {stake:.2f} stake, {granularity}s candles - cheapest per DAY first")
+    print(f"{'symbol':<12}{'mult':>6}{'comm':>8}{'stop-out':>10}{'vol':>9}"
+          f"{'trades/day':>12}{'cost/day':>10}")
+    for r in rows:
+        if r.get("unavailable"):
+            print(f"{r['symbol']:<12}  unavailable: {r['unavailable']}")
+            continue
+        print(f"{r['symbol']:<12}{r['multiplier']:>6}{r['commission']:>8.2f}"
+              f"{r['stop_out_pct']:>9.3f}%{r['vol']:>8.1%}"
+              f"{r['trades_per_day']:>12.2f}{r['cost_per_day']:>10.2f}")
+    print()
+    print("Expected result per trade is minus the commission on any symbol, so this")
+    print("ranks how fast each one makes you re-pay it. It is a cost floor, not an edge.")
 
 
 def cmd_preflight(config: dict[str, Any]) -> None:
@@ -1001,6 +1071,15 @@ def main() -> None:
     up.add_argument("name", nargs="?", default=None)
     up.add_argument("--config", default="config.yaml")
 
+    sc = sub.add_parser(
+        "symbol-cost",
+        help="Rank symbols by what multipliers cost per day (vol x leverage squared)",
+    )
+    sc.add_argument("--config", default="config.yaml")
+    sc.add_argument("--symbols", nargs="*", default=None)
+    sc.add_argument("--stake", type=float, default=50.0)
+    sc.add_argument("--granularity", type=int, default=60)
+
     pf = sub.add_parser(
         "preflight",
         help="Check the config and account are safe before trading (esp. real money)",
@@ -1028,6 +1107,8 @@ def main() -> None:
         cmd_ladder_risk(config, args.capital, args.win_prob, args.seconds_per_trade)
     elif args.mode == "use-profile":
         cmd_use_profile(args.name)
+    elif args.mode == "symbol-cost":
+        cmd_symbol_cost(config, args.symbols, args.stake, args.granularity)
     elif args.mode == "preflight":
         cmd_preflight(config)
     elif args.mode == "independence-test":
