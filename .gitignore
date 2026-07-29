@@ -13,3 +13,7 @@ config.yaml.bak
 tick_cache*/
 tick_analysis*.json
 tick_analysis*.log
+daily_cache/
+hourly_cache/
+scratch_*.json
+scratch_*.py
