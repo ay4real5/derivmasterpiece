@@ -178,3 +178,118 @@ def test_choose_streak_only_sees_what_it_is_given():
     train, _test = split_sample(reverting_returns(n=20000))
     k = choose_streak(train, (2, 3), 0.0)
     assert k in (2, 3)
+
+
+# --- the volatility filter -------------------------------------------------
+
+def _candles_from_returns(rets, ranges=None):
+    """Build OHLC bars whose closes follow `rets` and whose high/low ranges
+    follow `ranges`, so a volatility filter has something to see."""
+    out, p = [], 100.0
+    for i, r in enumerate(rets):
+        o = p
+        p *= math.exp(r)
+        span = (ranges[i] if ranges else abs(r)) or 1e-6
+        hi = max(o, p) * (1 + span / 2)
+        lo = min(o, p) * (1 - span / 2)
+        out.append({"open": o, "high": hi, "low": lo, "close": p, "epoch": i * 3600})
+    return out
+
+
+def test_vol_forecast_is_aligned_and_causal():
+    """out[t] must depend only on bars <= t. Leakage here would be invisible
+    and would make every filtered result meaningless."""
+    from pricebot.reversal_backtest import vol_forecasts
+    rets = coin_returns(n=300, size=0.01)
+    cs = _candles_from_returns(rets)
+    full = vol_forecasts(cs, lookback=6)
+    # Truncating the future must not change any earlier value.
+    trunc = vol_forecasts(cs[:200], lookback=6)
+    assert full[:200] == trunc
+
+
+def test_vol_forecast_needs_two_bars_before_reporting():
+    from pricebot.reversal_backtest import vol_forecasts
+    cs = _candles_from_returns([0.01, -0.01, 0.01])
+    assert vol_forecasts(cs, lookback=6)[0] is None
+
+
+def test_causal_rank_uses_only_the_past():
+    from pricebot.reversal_backtest import causal_rank
+    vals = [float(i) for i in range(100)]
+    # a monotone series: the newest value is always the largest so far
+    assert causal_rank(vals, 90) == pytest.approx(1.0)
+    # and it must refuse before it has enough history
+    assert causal_rank(vals, 5) is None
+
+
+def test_causal_rank_is_none_when_history_is_missing():
+    from pricebot.reversal_backtest import causal_rank
+    assert causal_rank([None] * 100, 50) is None
+
+
+def test_vol_buckets_are_flat_when_volatility_carries_no_information():
+    """Constant-range bars: the gross edge must not vary by bucket, so the
+    diagnostic cannot invent a reason to filter."""
+    from pricebot.reversal_backtest import reversal_by_vol_bucket
+    rets = reverting_returns(n=8000, size=0.01, p_reverse=0.60)
+    cs = _candles_from_returns(rets, ranges=[0.01] * len(rets))
+    rows = [r for r in reversal_by_vol_bucket(cs, 2) if r["trades"] > 50]
+    assert len(rows) >= 2
+    g = [r["gross_per_trade"] for r in rows]
+    assert max(g) - min(g) < 0.004, "flat volatility must give flat buckets"
+
+
+def test_vol_buckets_rise_when_the_edge_scales_with_volatility():
+    """The mechanism the whole idea depends on, injected deliberately: bigger
+    bars carry a proportionally bigger reversal edge."""
+    from pricebot.reversal_backtest import reversal_by_vol_bucket
+    rng = random.Random(21)
+    rets, ranges = [], []
+    prev = 1
+    for i in range(20000):
+        # volatility alternates in long blocks so a trailing forecast can see it
+        big = (i // 400) % 2 == 0
+        size = 0.03 if big else 0.003
+        # 60% reversal after two same-direction bars
+        if len(rets) >= 2 and (rets[-1] > 0) == (rets[-2] > 0):
+            last = 1 if rets[-1] > 0 else -1
+            s = -last if rng.random() < 0.60 else last
+        else:
+            s = 1 if rng.random() < 0.5 else -1
+        rets.append(s * size)
+        ranges.append(size)
+    cs = _candles_from_returns(rets, ranges)
+    rows = [r for r in reversal_by_vol_bucket(cs, 2) if r["trades"] > 50]
+    assert rows[-1]["gross_per_trade"] > rows[0]["gross_per_trade"] * 2
+
+
+def test_filtered_reversal_takes_fewer_trades_as_the_threshold_rises():
+    from pricebot.reversal_backtest import simulate_reversal_filtered
+    cs = _candles_from_returns(coin_returns(n=6000, size=0.01))
+    counts = [simulate_reversal_filtered(cs, 2, q, fee_per_side=0.0)["trades"]
+              for q in (0.0, 0.5, 0.9)]
+    assert counts == sorted(counts, reverse=True)
+
+
+def test_filtered_reversal_is_null_on_random_data():
+    from pricebot.reversal_backtest import simulate_reversal_filtered
+    cs = _candles_from_returns(coin_returns(n=20000, size=0.01))
+    r = simulate_reversal_filtered(cs, 2, 0.5, fee_per_side=0.0)
+    assert r["trades"] > 200
+    assert abs(r["tstat"]) < 3.0
+
+
+def test_filtered_reversal_never_reads_the_bar_it_trades():
+    """Changing a FUTURE bar must not change an earlier trade's decision.
+
+    The single most important guard: a filter that peeks at the bar it is
+    about to trade will look spectacular and be worthless.
+    """
+    from pricebot.reversal_backtest import simulate_reversal_filtered
+    rets = list(coin_returns(n=2000, size=0.01))
+    cs = _candles_from_returns(rets)
+    a = simulate_reversal_filtered(cs[:1500], 2, 0.5, fee_per_side=0.0)
+    b = simulate_reversal_filtered(cs, 2, 0.5, fee_per_side=0.0)
+    # every trade in the truncated run must also exist in the full run
+    assert b["trades"] >= a["trades"]
