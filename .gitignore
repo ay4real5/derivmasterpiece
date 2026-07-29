@@ -20,3 +20,4 @@ scratch_*.py
 risefall_journal.csv
 risefall_live.log
 config.risefall.yaml
+bybit_cache/
