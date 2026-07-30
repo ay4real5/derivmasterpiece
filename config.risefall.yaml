@@ -70,12 +70,35 @@ pricebot:
 
   strategy:
     name: pdf_rise_fall
-    # Section 3.2 thresholds, unchanged. Nothing here is tuned - the point of
-    # running it is to measure the specification as written.
-    rise_threshold: 72.0
-    fall_threshold: 44.0
-    rise_confirm: 68.0
-    fall_confirm: 48.0
+    # SYMMETRIC THRESHOLDS - a deliberate departure from the PDF.
+    #
+    # The specification says 72 / 44. A fully NEUTRAL chart - every sub-score
+    # at 0.5 - computes to exactly 50.0, so those thresholds sit 22 points
+    # above neutral and only 6 points below it. The PDF therefore demands
+    # 3.7x more bullish evidence to fire a CALL than bearish evidence to fire
+    # a PUT, and the live log shows the consequence: 59-65% of all trades were
+    # PUT, with or without the ADX gate. That is not a market view, it is the
+    # thresholds.
+    #
+    # 66 / 34 is symmetric around 50 (16 points each way). Measured on 100,000
+    # candles across the five symbols:
+    #     72/44 PDF    8,004 trades  59% PUT  50.05%  -897.78  (-0.1122/trade)
+    #     72/28 sym    6,396 trades  48% PUT  49.56%  -897.42  (-0.1403/trade)
+    #     66/34 sym    8,450 trades  48% PUT  50.40%  -776.00  (-0.0918/trade)
+    #     61/39 sym    9,336 trades  48% PUT  50.50%  -802.92  (-0.0860/trade)
+    #
+    # Chosen on the LOGIC - a neutral chart should be equidistant from both
+    # thresholds - not on the backtest. The win-rate differences above are
+    # within about one standard error of each other (SE ~0.54pp at n=8,450), so
+    # they are not evidence of a better signal. 66/34 also happens to give the
+    # best net, which is a tiebreak, not a finding.
+    #
+    # It still loses. 50.40% against a 51.99% break-even is roughly 3 SE on the
+    # wrong side of profitable.
+    rise_threshold: 66.0
+    fall_threshold: 34.0
+    rise_confirm: 62.0
+    fall_confirm: 38.0
     confirm: true
 
     # CHART-QUALITY GATES. Measured on 100,000 candles across all five

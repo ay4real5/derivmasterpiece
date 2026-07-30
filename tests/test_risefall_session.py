@@ -479,3 +479,59 @@ def test_stake_is_capped_by_max_stake_even_if_the_ladder_asks_for_more():
     for loss in (-3.00, -3.25):
         sess._staker("R_10").record(loss)
     assert sess._stake_for_symbol("R_10", _sig()) == pytest.approx(4.00)
+
+
+# --- threshold symmetry ----------------------------------------------------
+
+def test_a_fully_neutral_chart_scores_fifty():
+    """The fact the whole symmetry argument rests on. If this is not 50, the
+    thresholds below are centred on the wrong number."""
+    from pricebot.pdf_strategy import _GATED_WEIGHTS
+    assert sum(0.5 * w for w in _GATED_WEIGHTS.values()) * 100 == pytest.approx(50.0)
+
+
+def test_shipped_thresholds_are_symmetric_around_neutral():
+    """The PDF's 72/44 sits 22 above neutral and 6 below, demanding 3.7x more
+    bullish than bearish evidence - which made 59-65% of live trades PUT."""
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    st = cfg["pricebot"]["strategy"]
+    up = st["rise_threshold"] - 50.0
+    down = 50.0 - st["fall_threshold"]
+    assert up == pytest.approx(down, abs=0.51), (
+        f"asymmetric: {up} above neutral vs {down} below")
+
+
+def test_shipped_confirms_are_symmetric_too():
+    """A symmetric pair of thresholds with asymmetric confirmations just moves
+    the bias into the confirmation step."""
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    st = cfg["pricebot"]["strategy"]
+    up = st["rise_confirm"] - 50.0
+    down = 50.0 - st["fall_confirm"]
+    assert up == pytest.approx(down, abs=0.51)
+
+
+def test_confirms_sit_inside_their_thresholds():
+    """Confirmation must be LOOSER than the trigger, or it can never pass."""
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    st = cfg["pricebot"]["strategy"]
+    assert st["rise_confirm"] < st["rise_threshold"]
+    assert st["fall_confirm"] > st["fall_threshold"]
+
+
+def test_symmetric_thresholds_balance_the_direction_mix():
+    """On symmetric random data the CALL/PUT split must be near even. The PDF's
+    asymmetry is what skewed it, and this asserts the fix works."""
+    import random
+    from pricebot.pdf_strategy import score_series_detail, signals_from_detail
+    rng = random.Random(31)
+    cs = _bars([rng.gauss(0, 0.0015) for _ in range(6000)])
+    d = score_series_detail(cs)
+    gates = dict(adx_mode="gate", min_adx=20.0, require_agreement=True)
+    sym = signals_from_detail(d, rise_threshold=66, fall_threshold=34,
+                              rise_confirm=62, fall_confirm=38, **gates)
+    calls = sum(1 for x in sym if x > 0)
+    puts = sum(1 for x in sym if x < 0)
+    total = calls + puts
+    if total >= 40:                      # only assert with a usable sample
+        assert 0.35 < puts / total < 0.65, f"still skewed: {puts}/{total} PUT"
