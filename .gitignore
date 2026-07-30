@@ -9,7 +9,7 @@ alerts.jsonl
 .venv/
 venv/
 alerts.jsonl
-config.yaml.bak
+config.yaml.bak*
 tick_cache*/
 tick_analysis*.json
 tick_analysis*.log

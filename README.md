@@ -196,6 +196,40 @@ you to type a confirmation phrase before starting a session that can place
 real trades. While `DEMO_MODE=true`, the bot never connects to the real
 account at all.
 
+## Symbol and contract costs (measured, not assumed)
+
+`config.yaml` is gitignored, so the reasoning behind the symbol set lives here.
+Re-measure with `python main.py scan-edge` whenever Deriv reprices.
+
+Quoted margin per contract, measured live on 2026-07-30 from **complementary
+pairs** — `3/payout_a + 3/payout_b − 1` **is** the margin, with no model of
+anything, because exactly one of the pair pays:
+
+| symbols | even_odd | rise_fall |
+|---|---|---|
+| R_10, R_25, R_50, R_75, 1HZ25V, 1HZ50V, 1HZ75V | **2.39%** | 3.99% |
+| R_100, 1HZ10V, 1HZ100V | 3.99% | 3.99% |
+
+Two things fall out of this that are easy to get wrong:
+
+- **The cheap/expensive split does not follow the 1HZ vs R_ line.** The three
+  expensive symbols are a mix of both families. "1HZ is noisier" is not a usable
+  axis — [TICK_ANALYSIS.md](TICK_ANALYSIS.md) found both families to be pure
+  random walks and statistically indistinguishable.
+- **`rise_fall` costs 67% more than `even_odd`** on the same symbol. Contract
+  family is a bigger cost lever than symbol choice.
+
+**Do not price `over_under` this way.** `DIGITOVER:4` wins on 5–9 and
+`DIGITUNDER:4` on 0–3, so digit **4 loses both** — they don't partition the
+outcomes and the pair trick returns a nonsense *negative* margin. A negative
+house margin is the tell that the pair is wrong, not that free money exists.
+Only `DIGITEVEN`/`DIGITODD` partition exactly.
+
+**Per-symbol PnL is not usable for choosing symbols.** The journal shows the
+1HZ family at −0.283/trade against R_ at −1.728, which looks decisive and
+isn't: with an 8-rung ladder those numbers record which symbol happened to be
+in rotation when a rung-7/8 run landed, not anything about the symbol.
+
 ## Strategies
 
 Set `strategy.name` in `config.yaml` to pick one (see `deriv_bot/strategy.py`
