@@ -43,10 +43,16 @@ def test_shipped_config_builds_a_working_session():
     assert sess.symbols and sess.stake > 0
 
 
-def test_shipped_config_uses_a_flat_stake():
+def test_stake_ceiling_is_coherent_with_the_staking_scheme():
+    """Flat staking means stake == max_stake. A ladder means max_stake must
+    clear the top rung, or it silently caps the ladder at rung 1."""
     cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
     pb = cfg["pricebot"]
-    assert pb["stake"] == pb["max_stake"], "stake must be flat - no ladder"
+    seq = (pb.get("staking") or {}).get("sequence")
+    if seq:
+        assert pb["max_stake"] >= max(seq)
+    else:
+        assert pb["stake"] == pb["max_stake"]
 
 
 def test_session_rejects_an_unknown_instrument():
@@ -148,9 +154,12 @@ async def test_session_opens_a_rise_fall_trade_without_touching_multipliers():
     assert sess.opened == 1, "expected one trade to open"
     sent = api.proposals[0]
     assert sent["contract_type"] in ("CALL", "PUT")
-    assert sent["duration_unit"] == "m"
+    # Assert against the CONFIG, not a hardcoded unit - this test went stale
+    # the moment the expiry changed from minutes to ticks.
+    assert sent["duration_unit"] == cfg["pricebot"]["duration_unit"]
+    assert sent["duration"] == cfg["pricebot"]["duration"]
     assert "multiplier" not in sent
-    assert sent["amount"] == 3.0
+    assert sent["amount"] == cfg["pricebot"]["stake"]
 
 
 @pytest.mark.asyncio
@@ -356,3 +365,117 @@ def test_shipped_config_strategy_kwargs_all_accepted():
     cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
     st = dict(cfg["pricebot"]["strategy"])
     build_strategy(st.pop("name"), **st)
+
+
+# --- tick durations --------------------------------------------------------
+
+def test_explicit_tick_duration_is_passed_through():
+    """3 ticks must reach Deriv as 3t, not be converted to minutes."""
+    p = build_proposal(_sig(), RISE_FALL, "R_10", 3.0, duration=3, duration_unit="t")
+    assert p["duration"] == 3 and p["duration_unit"] == "t"
+
+
+def test_explicit_duration_overrides_the_signal_horizon():
+    p = build_proposal(_sig(horizon=300), RISE_FALL, "R_10", 3.0,
+                       duration=3, duration_unit="t")
+    assert p["duration"] == 3 and p["duration_unit"] == "t"
+
+
+def test_absent_duration_still_derives_minutes_from_the_horizon():
+    p = build_proposal(_sig(horizon=300), RISE_FALL, "R_10", 3.0)
+    assert p["duration"] == 5 and p["duration_unit"] == "m"
+
+
+def test_bad_duration_unit_is_rejected_loudly():
+    with pytest.raises(ValueError, match="duration_unit"):
+        build_proposal(_sig(), RISE_FALL, "R_10", 3.0, duration=3, duration_unit="x")
+    with pytest.raises(ValueError, match="duration"):
+        build_proposal(_sig(), RISE_FALL, "R_10", 3.0, duration=0, duration_unit="t")
+
+
+def test_session_rejects_a_bad_duration_unit_at_construction():
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    cfg["pricebot"]["duration_unit"] = "banana"
+    with pytest.raises(ValueError, match="duration_unit"):
+        Session(api=None, config=cfg, journal=None)
+
+
+# --- the three-rung ladder ------------------------------------------------
+
+def test_shipped_ladder_is_exactly_three_rungs():
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    stk = cfg["pricebot"]["staking"]
+    assert stk["name"] == "recovery_ladder"
+    assert len(stk["sequence"]) == 3
+    assert stk["reset_after_losses"] == 3
+
+
+def test_max_stake_clears_the_top_rung():
+    """max_stake below the top rung silently caps the ladder at rung 1 and the
+    recovery never happens. This was the config as first written."""
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    pb = cfg["pricebot"]
+    assert pb["max_stake"] >= max(pb["staking"]["sequence"])
+
+
+def test_ladder_rungs_recover_the_cumulative_loss():
+    """Each rung must be the prior cumulative loss / net multiplier, or the
+    'recovery' does not recover anything."""
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    stk = cfg["pricebot"]["staking"]
+    seq, net = stk["sequence"], stk["assumed_net_multiplier"]
+    for i in range(1, len(seq)):
+        assert seq[i] == pytest.approx(sum(seq[:i]) / net, abs=0.01)
+
+
+def test_worst_case_cycle_fits_the_daily_cap():
+    """A ladder that cannot complete inside the daily cap takes every loss
+    climbing and then gets truncated - which happened on the digit bot."""
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    seq = cfg["pricebot"]["staking"]["sequence"]
+    worst_per_symbol = sum(seq)
+    all_symbols = worst_per_symbol * len(cfg["pricebot"]["symbols"])
+    assert worst_per_symbol == pytest.approx(13.02, abs=0.01)
+    assert all_symbols < 700, "every symbol at the top rung must fit the cap"
+
+
+def test_session_climbs_and_resets_the_ladder_per_symbol():
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    sess = Session(api=FakeAPI(), config=cfg, journal=FakeJournal())
+    sig = _sig()
+    assert sess._stake_for_symbol("R_10", sig) == pytest.approx(3.00)
+    sess._staker("R_10").record(-3.00)
+    assert sess._stake_for_symbol("R_10", sig) == pytest.approx(3.25)
+    sess._staker("R_10").record(-3.25)
+    assert sess._stake_for_symbol("R_10", sig) == pytest.approx(6.77)
+    # a win resets
+    sess._staker("R_10").record(+2.77)
+    assert sess._stake_for_symbol("R_10", sig) == pytest.approx(3.00)
+
+
+def test_ladder_wraps_after_the_third_loss_rather_than_climbing():
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    sess = Session(api=FakeAPI(), config=cfg, journal=FakeJournal())
+    for loss in (-3.00, -3.25, -6.77):
+        sess._staker("R_10").record(loss)
+    assert sess._stake_for_symbol("R_10", _sig()) == pytest.approx(3.00)
+
+
+def test_one_symbols_losses_never_raise_another_symbols_stake():
+    """The reason the ladder is per-symbol. A shared one would 'recover'
+    R_10's stake because R_75 lost, which recovers nothing."""
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    sess = Session(api=FakeAPI(), config=cfg, journal=FakeJournal())
+    sess._staker("R_75").record(-3.00)
+    sess._staker("R_75").record(-3.25)
+    assert sess._stake_for_symbol("R_75", _sig()) == pytest.approx(6.77)
+    assert sess._stake_for_symbol("R_10", _sig()) == pytest.approx(3.00)
+
+
+def test_stake_is_capped_by_max_stake_even_if_the_ladder_asks_for_more():
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    cfg["pricebot"]["max_stake"] = 4.00
+    sess = Session(api=FakeAPI(), config=cfg, journal=FakeJournal())
+    for loss in (-3.00, -3.25):
+        sess._staker("R_10").record(loss)
+    assert sess._stake_for_symbol("R_10", _sig()) == pytest.approx(4.00)

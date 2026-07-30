@@ -24,16 +24,48 @@ pricebot:
   # so if this is going to be traded, here is where it costs least.
   symbols: [R_10, R_25, R_50, R_75, R_100]
 
-  # Flat stake, no ladder. A recovery ladder pushes size into losing runs,
-  # which is exactly backwards when each contract has a fixed negative
-  # expectation; the digit bot's own journal showed losses exceeding its
-  # house edge for that reason.
   stake: 3.00
-  max_stake: 3.00
+  # max_stake MUST clear the top rung or it silently caps the ladder at its
+  # first step and the recovery never happens. 6.77 is the third rung exactly.
+  max_stake: 6.77
+
+  # THREE-RUNG RECOVERY LADDER, requested explicitly.
+  #     3.00 -> 3.25 -> 6.77 -> back to 3.00
+  # Not arbitrary: each rung is the previous cumulative loss divided by the
+  # net multiplier 0.9233, so a win exactly recovers the run.
+  #     rung 2 = 3.00 / 0.9233           = 3.25
+  #     rung 3 = (3.00 + 3.25) / 0.9233  = 6.77
+  # Worst case per failed cycle is 3.00 + 3.25 + 6.77 = 13.02, which fits the
+  # 700 daily cap about 53 times over.
+  #
+  # What the ladder does NOT do is change the odds. Every rung is still a
+  # 51.99% break-even bet, so the sequence redistributes when you lose rather
+  # than reducing how much. Winning on rung 2 or 3 returns roughly ZERO for
+  # the cycle - only a first-rung win profits.
+  #
+  # The ladder is PER SYMBOL. One shared across five symbols with 6-second
+  # contracts settling out of order would raise R_10's stake because R_75
+  # lost, which recovers nothing.
+  staking:
+    name: recovery_ladder
+    assumed_net_multiplier: 0.9233
+    reset_after_losses: 3
+    sequence: [3.00, 3.25, 6.77]
 
   # One-minute candles. The PDF needs about 50 of them warmed up before ADX
   # means anything, and `measure_symbol` fetches 500.
   granularity: 60
+  # THREE TICKS, requested. On R_* symbols a tick is 2 seconds, so this is a
+  # 6-second contract. Measured: the payout is 1.9233x at EVERY duration from
+  # 1 tick to 1 hour, so the break-even stays 51.99% and short expiries buy no
+  # accuracy - a backtest across 1/2/5/15/30/60 minutes came back flat at
+  # 48.9-50.4%. What changes is how OFTEN the 3.99% is paid.
+  duration: 3
+  duration_unit: t
+
+  # This is the real throttle now. The contract lasts 6 seconds but a symbol
+  # is only reconsidered every poll, so this - not the duration - sets the
+  # trade rate and therefore the burn.
   poll_seconds: 30
 
   strategy:
@@ -71,6 +103,4 @@ pricebot:
     # bull case and a bear case is not a forecast - it commits to whichever
     # weighed more. That was 10% of live trades.
     require_agreement: true
-    # 5 minutes. Long enough that the 3.83% margin is not being paid every
-    # few seconds, short enough to accumulate a readable sample in a day.
     duration_seconds: 300

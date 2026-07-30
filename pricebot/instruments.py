@@ -114,7 +114,9 @@ def build_proposal(signal: Signal, instrument: str, symbol: str, stake: float,
                    currency: str = "USD",
                    stop_fraction: float = DEFAULT_STOP_FRACTION,
                    allowed_multipliers: tuple[int, ...] | None = None,
-                   commission: float = 0.0) -> dict[str, Any] | None:
+                   commission: float = 0.0,
+                   duration: int | None = None,
+                   duration_unit: str | None = None) -> dict[str, Any] | None:
     """`api.proposal` kwargs for this signal, or None if it is not tradeable.
 
     Returning None rather than a zero-size order keeps "no trade" a first
@@ -147,11 +149,24 @@ def build_proposal(signal: Signal, instrument: str, symbol: str, stake: float,
         }
 
     if instrument == RISE_FALL:
+        # An explicit duration wins over the signal's horizon. Tick contracts
+        # cannot be expressed in seconds - "3 ticks" is 6 seconds on an R_
+        # symbol and 3 on a 1HZ one - so deriving them from horizon_seconds
+        # would silently mean different things per symbol.
+        if duration is not None:
+            if duration < 1:
+                raise ValueError("duration must be >= 1")
+            unit = duration_unit or "m"
+            if unit not in ("t", "s", "m", "h", "d"):
+                raise ValueError(f"bad duration_unit {unit!r}")
+            dur, unit_out = int(duration), unit
+        else:
+            dur, unit_out = max(1, int(signal.horizon_seconds // 60)), "m"
         return {
             **base,
             "contract_type": "CALL" if signal.direction > 0 else "PUT",
-            "duration": max(1, int(signal.horizon_seconds // 60)),
-            "duration_unit": "m",
+            "duration": dur,
+            "duration_unit": unit_out,
         }
 
     # TOUCH - the only instrument that can express "no move expected"

@@ -69,6 +69,23 @@ class Session:
         self.stake: float = float(pb.get("stake", 50.0))
         self.max_stake: float = float(pb.get("max_stake", self.stake))
         self.poll_seconds: float = float(pb.get("poll_seconds", 20))
+        # Explicit contract duration. Ticks especially must be stated rather
+        # than derived: "3 ticks" is 6 seconds on R_* and 3 on 1HZ*, so a
+        # seconds-based horizon would mean different trades per symbol.
+        self.duration = pb.get("duration")
+        self.duration_unit = pb.get("duration_unit")
+        if self.duration is not None:
+            self.duration = int(self.duration)
+            if self.duration < 1:
+                raise ValueError("duration must be >= 1")
+            if self.duration_unit not in ("t", "s", "m", "h", "d"):
+                raise ValueError("duration_unit must be one of t/s/m/h/d")
+        # Per-SYMBOL staking. A single shared ladder across five symbols with
+        # 6-second contracts settling out of order would escalate one market's
+        # stake because a different one lost, which is not a recovery of
+        # anything. Each symbol runs its own sequence.
+        self.staking_cfg = dict(pb.get("staking") or {})
+        self.stakers: dict[str, Any] = {}
         strat_cfg = dict(pb.get("strategy", {}))
         self.strategy = build_strategy(strat_cfg.pop("name", "never"), **strat_cfg)
         # contract_id per symbol; a symbol with a live position is skipped so
@@ -83,6 +100,28 @@ class Session:
         self.opened = 0
         self.settled = 0
         self.realised = 0.0
+
+    def _staker(self, symbol: str):
+        """The staker for one symbol, created on first use."""
+        if symbol not in self.stakers:
+            cfg = dict(self.staking_cfg)
+            name = cfg.pop("name", "flat")
+            from deriv_bot.staking import build_staker
+            self.stakers[symbol] = build_staker(name, **cfg)
+        return self.stakers[symbol]
+
+    def _stake_for_symbol(self, symbol: str, signal) -> float:
+        """Ladder rung for this symbol, capped by max_stake.
+
+        max_stake is a hard ceiling on top of the ladder, not a replacement
+        for it: without one, a config mistake in `reset_after_losses` climbs
+        without limit.
+        """
+        st = self._staker(symbol)
+        want = st.stake_for(self.stake, 0.9233, float("inf"))
+        if self.max_stake:
+            want = min(want, self.max_stake)
+        return round(max(0.0, want), 2)
 
     def _log(self, msg: str) -> None:
         stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -99,6 +138,12 @@ class Session:
             profit = float(contract.get("profit") or 0.0)
             self.settled += 1
             self.realised += profit
+            # The ladder only means anything if losses are recorded against
+            # the same symbol that produced them.
+            try:
+                self._staker(symbol).record(profit)
+            except Exception as exc:   # noqa: BLE001 - staking must not kill the watcher
+                self._log(f"staking record failed for {symbol}: {type(exc).__name__}")
             self._log(f"CLOSED  {symbol} {contract_id} profit {profit:+.2f} "
                       f"(session {self.realised:+.2f} over {self.settled} closed)")
             self.journal.record(
@@ -158,11 +203,15 @@ class Session:
                 self._log(f"{symbol}: no multipliers offered, skipping")
                 return
 
+        amount = self._stake_for_symbol(symbol, signal)
+        if amount <= 0:
+            self._log(f"{symbol}: staking returned 0, skipping")
+            return
         params = build_proposal(
-            signal, self.instrument, symbol,
-            stake_for(signal, self.stake, self.max_stake),
+            signal, self.instrument, symbol, amount,
             allowed_multipliers=allowed or None,
             commission=self.commissions.get(symbol, 0.0),
+            duration=self.duration, duration_unit=self.duration_unit,
         )
         if params is None:
             return
@@ -187,9 +236,11 @@ class Session:
             payout = float(proposal.get("payout") or 0.0)
             stake_paid = float(params["amount"])
             be = (stake_paid / payout) if payout else float("nan")
+            st = self._staker(symbol)
+            rung = getattr(st, "consecutive_losses", 0) + 1
             self._log(
                 f"OPEN    {symbol} {params['contract_type']} "
-                f"stake {stake_paid:.2f} payout {payout:.2f} "
+                f"stake {stake_paid:.2f} rung {rung} payout {payout:.2f} "
                 f"({payout/stake_paid:.4f}x, break-even {be:.1%}) "
                 f"for {params['duration']}{params['duration_unit']} | {signal.reason}"
             )
@@ -206,8 +257,12 @@ class Session:
 
     async def run(self, seconds: float) -> None:
         deadline = time.monotonic() + seconds
-        hold = ("expiry set by strategy" if self.instrument == RISE_FALL
-                else f"hold~{self.hold_seconds/60:.0f}m")
+        if self.instrument == RISE_FALL:
+            hold = (f"expiry {self.duration}{self.duration_unit}"
+                    if self.duration else "expiry set by strategy")
+            hold += f" staking={self.staking_cfg.get('name', 'flat')}"
+        else:
+            hold = f"hold~{self.hold_seconds/60:.0f}m"
         self._log(f"session start | {self.instrument} | symbols={self.symbols} "
                   f"strategy={self.strategy.name} stake={self.stake} {hold} "
                   f"candles={self.granularity}s")
