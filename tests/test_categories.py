@@ -25,12 +25,19 @@ def test_a_cheap_family_is_always_in_the_rotation():
     restored the test failed for doing its job wrongly - it was guarding a
     choice, not an invariant. Including the expensive family is allowed; making
     it the ONLY family is what would be a mistake nobody chose.
+
+    Checked by LEG, not by category name. The rewrite above still named the
+    cheap categories, and that broke again the moment one-sided variants
+    arrived: `even` quotes the same 2.39% as `even_odd` but is a different
+    string, so a name-based check called it expensive. Twice burned - the cost
+    belongs to the contract, so ask the contract.
     """
     cats = load_config()["scan_trade"]["categories"]
-    cheap = {"over_under", "even_odd"}
-    assert cheap & set(cats), (
-        f"only expensive families configured: {cats} - at least one of "
-        f"{sorted(cheap)} should be in the rotation")
+    legs = [leg for c in cats for leg in CATEGORY_LEGS[c]]
+    # DIGIT* contracts quote ~2.39%; CALL/PUT quote 3.99% on the same symbol.
+    assert any(ct.startswith("DIGIT") for ct, _ in legs), (
+        f"only CALL/PUT legs configured: {cats} - every trade would pay the "
+        f"3.99% tier when 2.39% is available")
 
 
 def test_two_families_remain_so_the_rotation_still_interchanges():

@@ -133,22 +133,28 @@ def test_category_and_symbol_rotation_cover_every_combination():
     # forever. Independent round-robins over 3 categories and N symbols
     # must visit every (category, symbol) pair within lcm(3, N) cycles.
     symbols = DEFAULT_SYMBOLS  # 10 symbols
-    category_rr = RoundRobin(list(CATEGORY_LEGS))
+    category_rr = RoundRobin([c for c in CATEGORY_LEGS if len(CATEGORY_LEGS[c]) == 2])
     symbol_rr = RoundRobin(symbols)
     seen = set()
     cycles = 30  # lcm(3, 10)
     for _ in range(cycles):
         seen.add((category_rr.next(), symbol_rr.next()))
     assert len(seen) == 3 * len(symbols)
-    assert {c for c, _ in seen} == set(CATEGORY_LEGS)
+    assert {c for c, _ in seen} == {"over_under", "even_odd", "rise_fall"}
     assert {s for _, s in seen} == set(symbols)
 
 
 def test_category_legs_cover_the_three_requested_types():
-    assert set(CATEGORY_LEGS) == {"over_under", "even_odd", "rise_fall"}
+    # The two-sided families, unchanged.
     assert CATEGORY_LEGS["over_under"] == [("DIGITOVER", "4"), ("DIGITUNDER", "4")]
     assert CATEGORY_LEGS["even_odd"] == [("DIGITEVEN", None), ("DIGITODD", None)]
     assert CATEGORY_LEGS["rise_fall"] == [("CALL", None), ("PUT", None)]
+    # One-sided variants, so "always EVEN, never ODD" is a config choice
+    # rather than a code change.
+    assert CATEGORY_LEGS["even"] == [("DIGITEVEN", None)]
+    assert CATEGORY_LEGS["odd"] == [("DIGITODD", None)]
+    assert CATEGORY_LEGS["rise"] == [("CALL", None)]
+    assert CATEGORY_LEGS["fall"] == [("PUT", None)]
 
 
 def test_scan_best_records_why_each_combination_failed():
@@ -177,3 +183,59 @@ def test_scan_best_records_nothing_when_every_quote_succeeds():
     results = asyncio.run(scan_best(api, ["R_10"], [("DIGITEVEN", None)], 2.0, "USD", errors=errors))
     assert len(results) == 1
     assert errors == []
+
+
+# --- one-sided categories --------------------------------------------------
+
+def test_one_sided_categories_have_exactly_one_leg():
+    from deriv_bot.multi_scan import ONE_SIDED_CATEGORIES
+    for cat in ONE_SIDED_CATEGORIES:
+        assert len(CATEGORY_LEGS[cat]) == 1, f"{cat} is not one-sided"
+
+
+def test_every_one_sided_leg_also_exists_two_sided():
+    """A one-sided category must be a genuine half of a real pair, not a new
+    contract type nobody has priced."""
+    from deriv_bot.multi_scan import ONE_SIDED_CATEGORIES
+    two_sided = {leg for c, legs in CATEGORY_LEGS.items()
+                 if c not in ONE_SIDED_CATEGORIES for leg in legs}
+    for cat in ONE_SIDED_CATEGORIES:
+        assert CATEGORY_LEGS[cat][0] in two_sided, (
+            f"{cat} names a leg that no two-sided category quotes")
+
+
+def test_one_sided_legs_are_all_quoted_by_the_scanner():
+    """A category whose leg is never quoted would make the rotation skip its
+    turn silently, which reads as 'the bot stopped trading that'."""
+    from deriv_bot.multi_scan import DEFAULT_CANDIDATES, ONE_SIDED_CATEGORIES
+    for cat in ONE_SIDED_CATEGORIES:
+        assert CATEGORY_LEGS[cat][0] in DEFAULT_CANDIDATES, (
+            f"{cat}'s leg is not in DEFAULT_CANDIDATES so it is never priced")
+
+
+def test_one_sided_categories_come_after_the_two_sided_ones():
+    """main.py reverse-looks-up a category by leg with next(), taking the
+    FIRST match. DIGITEVEN belongs to both even_odd and even, so ordering is
+    what keeps existing configs displaying the name they always did."""
+    names = list(CATEGORY_LEGS)
+    two_sided_max = max(i for i, c in enumerate(names) if len(CATEGORY_LEGS[c]) == 2)
+    one_sided_min = min(i for i, c in enumerate(names) if len(CATEGORY_LEGS[c]) == 1)
+    assert one_sided_min > two_sided_max
+
+
+def test_a_one_leg_category_still_selects_that_leg():
+    """min() over a single-item list must return the item, not raise."""
+    results = [{"symbol": "R_10", "contract_type": "DIGITEVEN", "barrier": None,
+                "edge_pct": 2.39}]
+    legs = CATEGORY_LEGS["even"]
+    cell = [r for r in results
+            if (r["contract_type"], r["barrier"]) in legs]
+    assert len(cell) == 1
+    assert min(cell, key=lambda r: r["edge_pct"])["contract_type"] == "DIGITEVEN"
+
+
+def test_rotation_over_one_sided_categories_alternates():
+    from deriv_bot.multi_scan import RoundRobin
+    rr = RoundRobin(["even", "rise"])
+    seen = [rr.next() for _ in range(6)]
+    assert seen.count("even") == 3 and seen.count("rise") == 3, seen

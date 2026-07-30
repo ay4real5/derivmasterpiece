@@ -49,7 +49,34 @@ CATEGORY_LEGS: dict[str, list[tuple[str, str | None]]] = {
     "over_under": [("DIGITOVER", "4"), ("DIGITUNDER", "4")],
     "even_odd": [("DIGITEVEN", None), ("DIGITODD", None)],
     "rise_fall": [("CALL", None), ("PUT", None)],
+    # ONE-SIDED categories. A two-leg category lets the scan pick whichever
+    # side is cheaper this cycle; a one-leg category commits to a side and
+    # takes it every time its turn comes up.
+    #
+    # These exist to make "always bet EVEN, never ODD" expressible in config
+    # rather than requiring a code change. They are listed AFTER the two-sided
+    # entries deliberately: the reverse lookup at main.py's `category = next(
+    # (c for c, legs in CATEGORY_LEGS.items() if ...))` returns the first
+    # match, and DIGITEVEN belongs to both `even_odd` and `even`, so ordering
+    # keeps that display naming unchanged for existing configs.
+    #
+    # Worth being clear about what a one-sided category does and does not do.
+    # It does NOT change the odds: DIGITEVEN wins on 0/2/4/6/8, five of ten,
+    # and CALL wins on a coin flip. Both are ~50% bets at their quoted margin,
+    # exactly as the two-sided versions are. What it changes is that the bot
+    # can no longer switch sides mid-run, so any streak in the underlying is
+    # ridden rather than straddled.
+    "even": [("DIGITEVEN", None)],
+    "odd": [("DIGITODD", None)],
+    "rise": [("CALL", None)],
+    "fall": [("PUT", None)],
+    "over": [("DIGITOVER", "4")],
+    "under": [("DIGITUNDER", "4")],
 }
+
+# The one-sided entries, for tests and tooling that need to tell them apart.
+ONE_SIDED_CATEGORIES = frozenset(
+    c for c, legs in CATEGORY_LEGS.items() if len(legs) == 1)
 
 
 class RoundRobin:

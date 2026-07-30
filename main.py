@@ -784,6 +784,29 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool,
                  f"Valid: {sorted(CATEGORY_LEGS)}")
     if not categories:
         sys.exit("scan_trade.categories cannot be empty.")
+
+    # RESTRICT THE QUOTED LEGS TO THE CONFIGURED CATEGORIES.
+    #
+    # Without this, `categories` only constrained the ROTATION, while
+    # `candidates` stayed at all six legs - and the deep study after a loss
+    # scans `candidates`, not the rotation's legs (see `_study_pick`:
+    # `target_legs = list(candidates) if deep else list(legs)`). So a config of
+    # `categories: [even, rise]` still bought DIGITODD and DIGITUNDER whenever
+    # a loss triggered a deep review: 9 of 26 trades, every one tagged
+    # selector=study, climbing the ladder to 29.36 on contracts the config had
+    # excluded outright.
+    #
+    # Filtering here fixes it everywhere at once - the scan quotes fewer legs,
+    # the rotation is unaffected, and neither study path can reach a leg the
+    # config did not ask for.
+    allowed_legs = {leg for c in categories for leg in CATEGORY_LEGS[c]}
+    candidates = [leg for leg in candidates if leg in allowed_legs]
+    if not candidates:
+        sys.exit(
+            f"scan_trade.categories {categories} and scan_trade.contracts have "
+            f"no legs in common - nothing could be quoted. Allowed legs for "
+            f"those categories: {sorted(allowed_legs)}")
+
     category_rr = RoundRobin(categories)
     symbol_rr = RoundRobin(symbols)
     study_cfg = dict(st_cfg.get("study", {}))
