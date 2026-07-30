@@ -19,6 +19,41 @@ from __future__ import annotations
 from .strategy import LowEdgeStrategy, Signal
 
 
+def fit_or_refuse(wanted: float, budget_left: float, progressive: bool,
+                  round_to: int | None = None) -> float:
+    """A progressive stake that does not fit the budget must be REFUSED, not cut.
+
+    Truncating is the worst of the three options. The whole premise of a
+    recovery ladder is that rung N wins back rungs 1..N-1; silently staking
+    less than rung N keeps every loss from the climb and removes the only bet
+    that could recover them.
+
+    Observed live on 2026-07-30: the ladder ran 14.10 -> 29.36 -> 61.13,
+    paying 104.59 to get there, and then wanted 127.29 with only 14.45 of
+    daily budget left. It staked 14.45. Even a WIN there returns about 13.34
+    against 104.59 already lost - so the rung did nothing except add another
+    loss. The platform showed 14.10, 29.36, 61.13, 14.45, which is not a
+    ladder at all.
+
+    Returning 0 lets the caller stop cleanly - it already treats a
+    sub-minimum stake as "stop for the day", which is the honest response to
+    a budget that can no longer support the strategy.
+
+    FLAT staking is different and is left alone: a smaller flat bet is still a
+    valid flat bet, with no recovery premise to break.
+    """
+    # Rounding is opt-in: the ladder has always returned 2dp stakes, the
+    # martingales have not, and quietly rounding them changes documented
+    # amounts for no reason.
+    if round_to is not None:
+        wanted = round(wanted, round_to)
+    if wanted <= 0:
+        return 0.0
+    if progressive and wanted > budget_left:
+        return 0.0
+    return max(0.0, min(wanted, budget_left))
+
+
 class Staker:
     def stake_for(self, base_stake: float, net_multiplier: float, budget_left: float) -> float:
         raise NotImplementedError
@@ -87,7 +122,7 @@ class RecoveryMartingale(Staker):
             wanted = min(wanted, self.max_stake_multiple * base_stake)
         if self.max_stake is not None:
             wanted = min(wanted, self.max_stake)
-        return max(0.0, min(wanted, budget_left))
+        return fit_or_refuse(wanted, budget_left, progressive=True)
 
     def record(self, profit: float) -> None:
         if profit < 0:
@@ -220,7 +255,7 @@ class DoublingMartingale(Staker):
         wanted = base_stake * (self.multiplier ** self.consecutive_losses)
         if self.max_stake_multiple is not None:
             wanted = min(wanted, self.max_stake_multiple * base_stake)
-        return max(0.0, min(wanted, budget_left))
+        return fit_or_refuse(wanted, budget_left, progressive=True)
 
     def record(self, profit: float) -> None:
         if profit < 0:
@@ -313,7 +348,11 @@ class RecoveryLadder(Staker):
             wanted = (self.cycle_loss + self.cycle_profit) / self.assumed_net_multiplier
         if self.max_stake_multiple is not None:
             wanted = min(wanted, self.max_stake_multiple * base_stake)
-        return max(0.0, min(round(wanted, 2), budget_left))
+        # A rung that does not fit is refused outright. See `fit_or_refuse`:
+        # staking a truncated rung keeps the whole climb's losses and removes
+        # the bet that was meant to recover them. round_to=2 preserves this
+        # class's long-standing 2dp stakes.
+        return fit_or_refuse(wanted, budget_left, progressive=True, round_to=2)
 
     def record(self, profit: float) -> None:
         if profit < 0:

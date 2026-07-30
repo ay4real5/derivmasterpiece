@@ -68,11 +68,33 @@ def test_martingale_resets_after_win():
     assert s.stake_for(35.0, 0.923, 800) == pytest.approx(35.0)
 
 
-def test_martingale_never_exceeds_budget():
+def test_martingale_refuses_rather_than_truncating_to_the_budget():
+    """This used to assert the stake was CUT to the remaining budget (120.0).
+
+    That behaviour was live-harmful and is deliberately changed. A recovery
+    stake exists to win back the run that preceded it; a truncated one keeps
+    every one of those losses and removes the bet that could recover them. Seen
+    on 2026-07-30: a ladder climbed 14.10 -> 29.36 -> 61.13, then wanted 127.29
+    with 14.45 left and staked 14.45. Even winning returns ~13.34 against
+    104.59 already lost.
+
+    The invariant this test was really protecting - never stake MORE than the
+    budget - still holds, and is asserted below.
+    """
     s = RecoveryMartingale()
     for _ in range(6):
         s.record(-100.0)
-    assert s.stake_for(35.0, 0.923, budget_left=120.0) == 120.0
+    got = s.stake_for(35.0, 0.923, budget_left=120.0)
+    assert got == 0.0, "a stake that does not fit must be refused, not cut"
+    assert got <= 120.0, "and must never exceed the budget"
+
+
+def test_martingale_takes_a_stake_that_does_fit():
+    s = RecoveryMartingale()
+    s.record(-35.0)
+    wanted = s.stake_for(35.0, 0.923, budget_left=10_000.0)
+    assert wanted > 0
+    assert s.stake_for(35.0, 0.923, budget_left=wanted) == pytest.approx(wanted)
 
 
 def test_martingale_explodes_on_high_prob_contracts():
@@ -163,11 +185,15 @@ def test_doubling_capped_by_max_stake_multiple():
     assert s.stake_for(10.0, 0.923, budget_left=100_000) == 320.0  # 32 x 10
 
 
-def test_doubling_capped_by_budget():
+def test_doubling_refuses_a_step_that_does_not_fit():
+    """Was: asserted the step was cut to 50.0. Same reasoning as the
+    martingale above - a halved doubling step is not a doubling step, it just
+    banks the losses that led to it."""
     s = DoublingMartingale()
     for _ in range(3):
         s.record(-1.0)
-    assert s.stake_for(10.0, 0.923, budget_left=50.0) == 50.0
+    assert s.stake_for(10.0, 0.923, budget_left=50.0) == 0.0
+    assert s.stake_for(10.0, 0.923, budget_left=80.0) == pytest.approx(80.0)
 
 
 def test_doubling_never_overrides_contract():

@@ -71,11 +71,33 @@ def test_recovery_overshoots_into_profit_on_cheaper_contracts():
         cum += stake
 
 
-def test_budget_left_caps_the_stake():
+def test_a_rung_that_does_not_fit_is_refused_not_capped():
+    """This test asserted the bug.
+
+    It required the stake to be CUT to the remaining budget, and that is
+    exactly what shipped: on 2026-07-30 the ladder ran 14.10 -> 29.36 -> 61.13,
+    paying 104.59 to get there, then wanted 127.29 with 14.45 of daily budget
+    left - and staked 14.45. The platform showed 14.10, 29.36, 61.13, 14.45,
+    which is not a ladder, and 14.45 is not even a rung.
+
+    A truncated rung is the worst of every option: the climb's losses are all
+    still there, and the one bet that could recover them has been shrunk to
+    where winning it changes nothing (14.45 x 0.9233 = 13.34, against 104.59
+    lost). Refusing lets the caller stop for the day, which it already does on
+    a sub-minimum stake.
+
+    The real invariant - never stake MORE than the budget - is unchanged and
+    asserted here too.
+    """
     s = RecoveryLadder(sequence=SEQ, reset_after_losses=8)
     for _ in range(7):
         s.record(-1.0)
-    assert s.stake_for(3.0, 0.9231, budget_left=50.0) == 50.0
+    got = s.stake_for(3.0, 0.9231, budget_left=50.0)
+    assert got == 0.0, "must refuse, not truncate"
+    assert got <= 50.0
+
+    # And the same rung IS taken when the budget can actually cover it.
+    assert s.stake_for(3.0, 0.9231, budget_left=SEQ[7]) == pytest.approx(SEQ[7])
 
 
 def test_rejects_bad_parameters():

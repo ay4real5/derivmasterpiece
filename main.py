@@ -685,7 +685,22 @@ async def _run_live(config: dict[str, Any], dry_run: bool,
             budget_left = abs(risk.limits.max_daily_loss) + risk.daily_pnl
             stake = round(staker.stake_for(base_stake, net_mult, budget_left), 2)
             if stake < MIN_STAKE:
-                print(f"Remaining budget ${budget_left:.2f} below minimum stake — stopping.")
+                # Two ways to land here, and they mean different things.
+                # A progressive staker returns 0 when its next rung does not
+                # FIT the remaining budget - refusing rather than staking a
+                # truncated rung that keeps the climb's losses and removes the
+                # bet meant to recover them.
+                wants = getattr(staker, "sequence", None)
+                rung = None
+                if wants:
+                    idx = min(getattr(staker, "consecutive_losses", 0), len(wants) - 1)
+                    rung = wants[idx]
+                if rung is not None and rung > budget_left:
+                    print(f"Ladder needs ${rung:.2f} for the next rung but only "
+                          f"${budget_left:.2f} of the daily budget remains — "
+                          f"stopping rather than staking a truncated rung.")
+                else:
+                    print(f"Remaining budget ${budget_left:.2f} below minimum stake — stopping.")
                 break
 
             proposal_params: dict[str, Any] = dict(
