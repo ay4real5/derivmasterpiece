@@ -125,6 +125,57 @@ def day_pnl(journal_path: str, day: date, since: str | None = None) -> float:
     return round(total, 2)
 
 
+def trailing_loss_streak(journal_path: str, day: date,
+                         since: str | None = None) -> int:
+    """How many consecutive losses the journal ENDS on, for today.
+
+    The ladder rung lives in process memory, so a restart used to drop it: the
+    child exited with code 3 (the dead-socket guard, which fires on any dropped
+    websocket) mid-ladder, came back, and staked 3.00 immediately after a 3.00
+    loss instead of 3.25. Every loss of the climb was paid and the rung that
+    would have recovered them was never placed.
+
+    The journal is flushed per trade and survives any restart - it is already
+    what `day_pnl` reads to keep the daily cap honest across restarts. The same
+    source can rebuild the rung, so no new state file is needed and there is
+    nothing extra to get out of sync.
+
+    Counts backwards from the newest trade and stops at the first win, which is
+    exactly what `RecoveryLadder.record` does with a winning profit. Same
+    row-skipping rules as `day_pnl` - missing file, blank profit on a dry-run
+    row, half-written final line - because the supervisor must never die
+    because the journal looked odd.
+    """
+    if not os.path.exists(journal_path):
+        return 0
+    prefix = day.isoformat()
+    profits: list[float] = []
+    try:
+        with open(journal_path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                stamp = (row.get("timestamp") or "").strip()
+                if not stamp.startswith(prefix):
+                    continue
+                if since is not None and stamp <= since:
+                    continue
+                raw = (row.get("profit") or "").strip()
+                if not raw:
+                    continue  # dry-run / unsettled row
+                try:
+                    profits.append(float(raw))
+                except ValueError:
+                    continue
+    except OSError:
+        return 0
+
+    streak = 0
+    for profit in reversed(profits):
+        if profit >= 0:
+            break
+        streak += 1
+    return streak
+
+
 def last_trade_time(journal_path: str) -> datetime | None:
     """Timestamp of the newest settled trade, or None if there are none.
 
@@ -339,7 +390,8 @@ def log(line: str, stream=None) -> None:
 
 
 def run_once(config: str, log_path: str, daily_pnl_offset: float = 0.0,
-             watchdog: "StallWatchdog | None" = None) -> tuple[int, str | None]:
+             watchdog: "StallWatchdog | None" = None,
+             ladder_streak: int = 0) -> tuple[int, str | None]:
     """Launch one scan-trade process, streaming its output into `log_path`.
 
     Returns (exit code, RiskManager stop reason if it printed one). The
@@ -356,8 +408,13 @@ def run_once(config: str, log_path: str, daily_pnl_offset: float = 0.0,
     # the bot on any crash or dropped socket, so without this each restart
     # silently granted a fresh allowance - the day reached -1016 against a
     # 1000 cap that way.
+    # Carry the ladder rung across the restart for the same reason the PnL
+    # offset is carried: both live in process memory and both are meaningless
+    # if a restart silently resets them. A rung dropped mid-cycle pays the
+    # whole climb and never places the recovery bet.
     cmd = [child_python(), "-u", "main.py", "scan-trade", "--config", config,
-           "--daily-pnl-offset", f"{daily_pnl_offset:.2f}"]
+           "--daily-pnl-offset", f"{daily_pnl_offset:.2f}",
+           "--ladder-streak", str(int(ladder_streak))]
     stop_reason: str | None = None
     fatal_config: bool = False
     with open(log_path, "a", encoding="utf-8") as out:
@@ -539,10 +596,20 @@ def _run() -> None:
 
         watchdog = StallWatchdog(journal_path, stall_seconds, _on_stall) if alerts_on else None
 
+        # Rebuilt from the journal on every launch, from the same rows and the
+        # same day-reset marker the PnL uses, so the two can never disagree
+        # about which trades count as "today".
+        streak = trailing_loss_streak(journal_path, utc_today(),
+                                      since=read_day_reset())
+        if streak:
+            log(f"resuming the ladder at rung {streak + 1} "
+                f"({streak} consecutive losses in the journal)")
+
         started = time.monotonic()
         stop_reason = None
         try:
-            code, stop_reason = run_once(args.config, log_path, pnl, watchdog)
+            code, stop_reason = run_once(args.config, log_path, pnl, watchdog,
+                                         ladder_streak=streak)
         except Exception as exc:  # noqa: BLE001 — a supervisor may not die
             code = -1
             log(f"launch failed: {exc!r}")

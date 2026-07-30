@@ -760,7 +760,8 @@ def cmd_live(config: dict[str, Any], dry_run: bool,
 
 
 async def _run_scan_trade(config: dict[str, Any], dry_run: bool,
-                          daily_pnl_offset: float = 0.0) -> None:
+                          daily_pnl_offset: float = 0.0,
+                          ladder_streak: int = 0) -> None:
     """Every cycle: quote every configured symbol x contract type, trade
     whichever quote has the smallest house margin right now, then wait out
     the rest of `interval_seconds` before scanning again. No tick stream is
@@ -852,6 +853,20 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool,
         print(f"REAL MONEY + progressive staking '{staking_name}' - enabled via "
               f"i_accept_progressive_staking_on_real. See tools/martingale_sim.py "
               f"for the bust rate at your bankroll.")
+    # Resume an interrupted ladder. CLAMPED, never trusted: the streak comes
+    # from reading a file, and a bad read must not open at a rung beyond the
+    # ladder or above the configured maximum stake.
+    if ladder_streak:
+        rungs = staking_cfg.get("sequence") or []
+        reset = staking_cfg.get("reset_after_losses")
+        ceiling = (len(rungs) - 1) if rungs else None
+        if reset:
+            ceiling = min(ceiling, reset - 1) if ceiling is not None else reset - 1
+        seeded = min(ladder_streak, ceiling) if ceiling is not None else ladder_streak
+        if seeded > 0:
+            staking_cfg = {**staking_cfg, "start_streak": seeded}
+            print(f"resuming ladder at rung {seeded + 1} after {ladder_streak} "
+                  f"consecutive losses carried across the restart")
     staker = build_staker(staking_name, **staking_cfg)
     base_stake = config["stake"]
 
@@ -1046,8 +1061,9 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool,
 
 
 def cmd_scan_trade(config: dict[str, Any], dry_run: bool = False,
-                   daily_pnl_offset: float = 0.0) -> None:
-    asyncio.run(_run_scan_trade(config, dry_run, daily_pnl_offset))
+                   daily_pnl_offset: float = 0.0,
+                   ladder_streak: int = 0) -> None:
+    asyncio.run(_run_scan_trade(config, dry_run, daily_pnl_offset, ladder_streak))
 
 
 def main() -> None:
@@ -1082,6 +1098,13 @@ def main() -> None:
         help="PnL the day has already realised before this process started. "
              "The supervisor passes this so max_daily_loss caps the day "
              "rather than resetting on every restart.",
+    )
+    st.add_argument(
+        "--ladder-streak", type=int, default=0,
+        help="Consecutive losses already on the journal when this process "
+             "started. The supervisor passes this so a recovery ladder "
+             "resumes its rung instead of dropping back to the base stake "
+             "on every restart.",
     )
 
     an = sub.add_parser("analyze", help="Report per-contract performance from the trade journal")
@@ -1153,7 +1176,8 @@ def main() -> None:
         cmd_independence_test(config)
     elif args.mode == "scan-trade":
         cmd_scan_trade(config, dry_run=args.dry_run,
-                       daily_pnl_offset=args.daily_pnl_offset)
+                       daily_pnl_offset=args.daily_pnl_offset,
+                       ladder_streak=args.ladder_streak)
     else:
         cmd_live(config, dry_run=args.dry_run)
 

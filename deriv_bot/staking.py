@@ -308,7 +308,8 @@ class RecoveryLadder(Staker):
                  reset_after_losses: int | None = None,
                  max_stake_multiple: float | None = None,
                  cycle_profit: float = 0.0,
-                 sequence: list[float] | None = None):
+                 sequence: list[float] | None = None,
+                 start_streak: int = 0):
         # An explicit sequence wins over the computed one. Compounding
         # rounded stakes drifts ~0.2% by the eighth rung, and for the number
         # that decides the worst case it is better to state the ladder
@@ -326,12 +327,24 @@ class RecoveryLadder(Staker):
             raise ValueError("max_stake_multiple must be >= 1")
         if cycle_profit < 0:
             raise ValueError("cycle_profit must be >= 0")
+        if start_streak < 0:
+            raise ValueError("start_streak must be >= 0")
         self.assumed_net_multiplier = assumed_net_multiplier
         self.reset_after_losses = reset_after_losses
         self.max_stake_multiple = max_stake_multiple
         self.cycle_profit = cycle_profit
         self.cycle_loss = 0.0
-        self.consecutive_losses = 0
+        # SEEDS THE RUNG so a new process resumes an interrupted cycle.
+        # DoublingMartingale has had this since it was written; this class
+        # never did, and the gap was live-visible: the child exited with code 3
+        # (the dead-socket guard) mid-ladder, restarted, and opened at 3.00
+        # right after a 3.00 loss instead of 3.25. The climb's losses were paid
+        # and the rung that would have recovered them was never placed.
+        #
+        # The supervisor reconstructs this from the journal - which is flushed
+        # per trade and therefore survives any restart - exactly as it already
+        # reconstructs the day's PnL for `--daily-pnl-offset`.
+        self.consecutive_losses = int(start_streak)
 
     def stake_for(self, base_stake: float, net_multiplier: float,
                   budget_left: float) -> float:
