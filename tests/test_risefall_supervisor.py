@@ -129,3 +129,38 @@ def test_child_is_launched_without_a_console():
     because console-control events reach every process sharing a console."""
     from tools.risefall_supervisor import CREATE_NO_WINDOW
     assert CREATE_NO_WINDOW == 0x08000000
+
+
+# --- logging must survive having no console --------------------------------
+
+def test_log_writes_to_the_file_even_with_no_usable_stream(tmp_path):
+    """Under pythonw there is no stdout, which silently hid the lock-refusal
+    message - the task fired, exited cleanly, and recorded nothing."""
+    from tools.risefall_supervisor import log
+
+    class Dead:
+        def write(self, *a): raise OSError("no console")
+        def flush(self): raise OSError("no console")
+
+    p = tmp_path / "out.log"
+    log("hello", stream=Dead(), path=str(p))
+    assert "hello" in p.read_text(encoding="utf-8")
+
+
+def test_log_does_not_raise_when_the_path_is_unwritable():
+    """Logging must never be the thing that kills the supervisor."""
+    from tools.risefall_supervisor import log
+    import io
+    buf = io.StringIO()
+    log("still fine", stream=buf, path="Z:/nope/nowhere/out.log")
+    assert "still fine" in buf.getvalue()
+
+
+def test_log_appends_rather_than_truncating(tmp_path):
+    from tools.risefall_supervisor import log
+    import io
+    p = tmp_path / "out.log"
+    log("first", stream=io.StringIO(), path=str(p))
+    log("second", stream=io.StringIO(), path=str(p))
+    text = p.read_text(encoding="utf-8")
+    assert "first" in text and "second" in text

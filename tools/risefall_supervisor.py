@@ -37,12 +37,31 @@ BACKOFF_SECONDS = (5, 15, 60, 180)
 MAX_CONSECUTIVE_FAILURES = 8
 
 
-def log(msg: str, stream=None) -> None:
+def log(msg: str, stream=None, path: str | None = None) -> None:
+    """Log to `stream` and, if given, append to `path` as well.
+
+    `path` matters more than it looks. Under pythonw - which is how the
+    scheduled task runs this, deliberately, so no console event can kill it -
+    there IS no stdout, so anything written only to the stream is discarded.
+    That silently hid the most important message this program emits: the task
+    fired, found the lock held, and exited cleanly with nothing recorded
+    anywhere to say why.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    line = f"[{stamp}] {msg}"
     # Resolved at call time, never bound as a default: under pythonw there is
     # no stdout at import, and a default argument would capture None forever.
     out = stream if stream is not None else sys.stdout
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    print(f"[{stamp}] {msg}", file=out, flush=True)
+    try:
+        print(line, file=out, flush=True)
+    except Exception:                    # noqa: BLE001 - no console under pythonw
+        pass
+    if path:
+        try:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            pass
 
 
 # Windows console-control events are delivered to every process sharing a
@@ -179,11 +198,12 @@ def main() -> None:
 
     if not acquire_lock():
         log("another supervisor already holds the lock - exiting rather than "
-            "doubling the trade rate and the daily-loss cap")
+            "doubling the trade rate and the daily-loss cap", path=log_path)
         return
 
     log(f"supervisor up | config={args.config} cap={args.max_daily_loss} "
-        f"target={args.target_profit or 'none'} session={args.minutes}m")
+        f"target={args.target_profit or 'none'} session={args.minutes}m",
+        path=log_path)
 
     try:
         _loop(args, journal, log_path, failures)
@@ -199,7 +219,7 @@ def _loop(args, journal: str, log_path: str, failures: int) -> None:
         if state != "trade":
             wait = seconds_until_next_utc_day()
             log(f"{state}: day PnL {pnl:+.2f} - sleeping {wait/3600:.1f}h "
-                f"until the next UTC day")
+                f"until the next UTC day", path=log_path)
             if args.once:
                 return
             time.sleep(min(wait, 3600))
@@ -215,10 +235,11 @@ def _loop(args, journal: str, log_path: str, failures: int) -> None:
             failures += 1
             if failures >= MAX_CONSECUTIVE_FAILURES:
                 log(f"giving up after {failures} consecutive failures - "
-                    f"this is a bug, not a market condition. See {args.log}.")
+                    f"this is a bug, not a market condition. See {args.log}.",
+                    path=log_path)
                 return
             delay = BACKOFF_SECONDS[min(failures - 1, len(BACKOFF_SECONDS) - 1)]
-            log(f"failure {failures}, backing off {delay}s")
+            log(f"failure {failures}, backing off {delay}s", path=log_path)
             time.sleep(delay)
 
 
