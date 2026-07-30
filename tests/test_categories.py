@@ -16,10 +16,21 @@ def test_config_categories_are_valid():
     assert all(c in CATEGORY_LEGS for c in cats)
 
 
-def test_rise_fall_is_dropped():
-    # within the seven cheap symbols: over_under 2.29%, even_odd 2.30%,
-    # rise_fall 3.79% - a 1.5 point penalty on a third of all trades
-    assert "rise_fall" not in load_config()["scan_trade"]["categories"]
+def test_a_cheap_family_is_always_in_the_rotation():
+    """rise_fall costs 3.99% against even_odd's 2.39% - measured live from
+    complementary DIGITEVEN/DIGITODD quotes, which partition exactly.
+
+    This used to assert rise_fall was DROPPED. That froze one day's decision
+    into a test, and when the 2026-07-28 configuration was deliberately
+    restored the test failed for doing its job wrongly - it was guarding a
+    choice, not an invariant. Including the expensive family is allowed; making
+    it the ONLY family is what would be a mistake nobody chose.
+    """
+    cats = load_config()["scan_trade"]["categories"]
+    cheap = {"over_under", "even_odd"}
+    assert cheap & set(cats), (
+        f"only expensive families configured: {cats} - at least one of "
+        f"{sorted(cheap)} should be in the rotation")
 
 
 def test_two_families_remain_so_the_rotation_still_interchanges():
@@ -28,11 +39,29 @@ def test_two_families_remain_so_the_rotation_still_interchanges():
 
 
 def test_config_symbols_exclude_the_expensive_tier():
-    # R_100, 1HZ100V, 1HZ10V price at 3.82-3.91% on both measured days
+    """R_100, 1HZ100V and 1HZ10V quote 3.99% against the others' 2.39% -
+    measured on three separate days now, same split every time.
+
+    Note the split does NOT follow the 1HZ/R_ family line: these three are a
+    mix of both. Excluding a whole family is not the same as excluding the
+    expensive tier, which is why this names symbols rather than a prefix.
+    """
     symbols = load_config()["scan_trade"]["symbols"]
     for expensive in ("R_100", "1HZ100V", "1HZ10V"):
         assert expensive not in symbols
-    assert len(symbols) == 7
+
+
+def test_more_than_one_symbol_stays_in_rotation():
+    """Concentration is its own failure mode: 'best symbol' selection once put
+    every trade on R_10 DIGITOVER, which removes any spread of the losing runs
+    AND makes a bad symbol indistinguishable from a bad strategy.
+
+    A count rather than an exact list - the set is a judgement call that has
+    changed several times, the need for more than one has not.
+    """
+    symbols = load_config()["scan_trade"]["symbols"]
+    assert len(symbols) >= 2, f"only {len(symbols)} symbol(s): {symbols}"
+    assert len(symbols) == len(set(symbols)), "duplicate symbols"
 
 
 def test_every_configured_category_has_legs():
