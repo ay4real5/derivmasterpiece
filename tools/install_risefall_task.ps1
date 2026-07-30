@@ -27,8 +27,9 @@ laptop.
 param(
     [switch]$Uninstall,
     [string]$TaskName = "DerivRiseFallSupervisor",
-    [double]$MaxDailyLoss = 100.0,
-    [double]$SessionMinutes = 30.0
+    [double]$MaxDailyLoss = 700.0,
+    [double]$SessionMinutes = 30.0,
+    [double]$TargetProfit = 700.0
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,7 +53,7 @@ if (-not (Test-Path $sup)) { throw "supervisor not found at $sup" }
 # pythonw.exe, not python.exe: a console process receives Ctrl-C style
 # console events and dies with STATUS_CONTROL_C_EXIT when the session that
 # started it closes. pythonw has no console, so nothing can send it one.
-$arguments = '-u "{0}" --config config.risefall.yaml --max-daily-loss {1} --minutes {2}' -f $sup, $MaxDailyLoss, $SessionMinutes
+$arguments = '-u "{0}" --config config.risefall.yaml --max-daily-loss {1} --target-profit {3} --minutes {2}' -f $sup, $MaxDailyLoss, $SessionMinutes, $TargetProfit
 
 $action = New-ScheduledTaskAction -Execute $py -Argument $arguments -WorkingDirectory $repo
 $trigger = New-ScheduledTaskTrigger -AtLogOn

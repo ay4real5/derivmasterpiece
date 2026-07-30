@@ -231,3 +231,128 @@ async def test_session_considers_all_five_symbols_each_cycle():
     import asyncio
     await asyncio.gather(*(sess._consider(s) for s in sess.symbols))
     assert set(seen) == set(cfg["pricebot"]["symbols"])
+
+
+# --- the chart-quality gates -----------------------------------------------
+
+def _bars(rets, ranges=None, adx_trend=False):
+    out, p = [], 100.0
+    for i, r in enumerate(rets):
+        o = p
+        p *= (1 + r)
+        span = ranges[i] if ranges else abs(r) + 1e-5
+        out.append({"open": o, "high": max(o, p) * (1 + span), "close": p,
+                    "low": min(o, p) * (1 - span), "epoch": i * 60})
+    return out
+
+
+def test_agreement_requires_both_directional_components():
+    from pricebot.pdf_strategy import directional_agreement
+    assert directional_agreement(0.85, 0.90) is True     # both bull
+    assert directional_agreement(0.15, 0.10) is True     # both bear
+    assert directional_agreement(0.85, 0.10) is False    # opposite
+    assert directional_agreement(0.15, 0.90) is False
+
+
+def test_agreement_treats_exactly_neutral_as_no_opinion():
+    """0.5 is 'no view'; it must not silently count as agreeing."""
+    from pricebot.pdf_strategy import directional_agreement
+    assert directional_agreement(0.5, 0.9) is False
+    assert directional_agreement(0.9, 0.5) is False
+    assert directional_agreement(0.5, 0.5) is False
+
+
+def test_gated_weights_sum_to_one_so_the_score_still_spans_0_100():
+    """If they did not, the 72/44 thresholds would silently mean something
+    different from what they say."""
+    from pricebot.pdf_strategy import _GATED_WEIGHTS
+    assert sum(_GATED_WEIGHTS.values()) == pytest.approx(1.0)
+    assert "adx" not in _GATED_WEIGHTS
+
+
+def test_gated_score_ignores_adx_entirely():
+    """Two markets identical except for trend STRENGTH must score the same
+    directionally - that is the whole point of the correction."""
+    from pricebot.pdf_strategy import _GATED_WEIGHTS
+    subs_weak = {"ema": 0.85, "rsi": 0.7, "bb": 0.5, "adx": 0.0, "candle": 0.5}
+    subs_strong = {**subs_weak, "adx": 1.0}
+    g = lambda s: sum(s[k] * w for k, w in _GATED_WEIGHTS.items())
+    assert g(subs_weak) == pytest.approx(g(subs_strong))
+
+
+def test_strategy_defaults_reproduce_the_pdf_exactly():
+    """The specification must stay testable as written."""
+    from pricebot.pdf_strategy import PdfRiseFall
+    s = PdfRiseFall()
+    assert s.adx_mode == "score" and s.min_adx == 0.0
+    assert s.require_agreement is False
+
+
+def test_strategy_rejects_a_nonsense_adx_mode():
+    from pricebot.pdf_strategy import PdfRiseFall
+    with pytest.raises(ValueError, match="adx_mode"):
+        PdfRiseFall(adx_mode="sideways")
+    with pytest.raises(ValueError, match="min_adx"):
+        PdfRiseFall(min_adx=-5)
+
+
+def test_adx_gate_blocks_a_trendless_market():
+    """The live bug, as a test: no trend must mean no trade, not a PUT."""
+    from pricebot.pdf_strategy import PdfRiseFall
+    import random
+    rng = random.Random(9)
+    # pure chop - no trend, so ADX stays low
+    cs = _bars([rng.choice([0.0008, -0.0008]) for _ in range(300)])
+    gated = PdfRiseFall(adx_mode="gate", min_adx=20.0, require_agreement=True)
+    sig = gated.evaluate(cs)
+    score = gated.score_at(cs)
+    if score is not None and score["adx_value"] < 20.0:
+        assert sig is None, "a trendless market must not produce a trade"
+
+
+def test_gates_never_increase_the_trade_count():
+    """Gates can only remove trades. If a variant trades MORE, a gate is
+    inverted somewhere and the backtest comparison is meaningless."""
+    from pricebot.pdf_strategy import score_series_detail, signals_from_detail
+    import random
+    rng = random.Random(10)
+    cs = _bars([rng.gauss(0, 0.0015) for _ in range(3000)])
+    d = score_series_detail(cs)
+    pure = sum(1 for x in signals_from_detail(d) if x)
+    g1 = sum(1 for x in signals_from_detail(d, adx_mode="gate", min_adx=20.0) if x)
+    g2 = sum(1 for x in signals_from_detail(
+        d, adx_mode="gate", min_adx=20.0, require_agreement=True) if x)
+    assert g2 <= g1
+    assert g1 <= pure or pure == 0
+
+
+def test_score_series_detail_matches_composite_score():
+    """A fast path nobody checked is an untested second implementation."""
+    from pricebot.pdf_strategy import composite_score, score_series_detail
+    import random
+    rng = random.Random(11)
+    cs = _bars([rng.gauss(0, 0.002) for _ in range(400)])
+    d = score_series_detail(cs)
+    c = composite_score(cs)
+    assert c is not None and d[-1] is not None
+    assert d[-1]["score"] == pytest.approx(c["score"])
+    assert d[-1]["gated_score"] == pytest.approx(c["gated_score"])
+    assert d[-1]["agree"] == c["agree"]
+
+
+# --- the shipped config now carries the gates ------------------------------
+
+def test_shipped_config_enables_the_gates():
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    st = cfg["pricebot"]["strategy"]
+    assert st["adx_mode"] == "gate"
+    assert st["min_adx"] >= 20.0
+    assert st["require_agreement"] is True
+
+
+def test_shipped_config_strategy_kwargs_all_accepted():
+    """A key the strategy does not accept is a crash-loop on startup - which
+    this project has already had once, from a signature that drifted."""
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    st = dict(cfg["pricebot"]["strategy"])
+    build_strategy(st.pop("name"), **st)

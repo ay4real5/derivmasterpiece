@@ -45,6 +45,32 @@ pricebot:
     rise_confirm: 68.0
     fall_confirm: 48.0
     confirm: true
+
+    # CHART-QUALITY GATES. Measured on 100,000 candles across all five
+    # symbols, pure PDF vs these gates:
+    #     pure PDF              12,146 trades  49.56%  -1703  (-0.1402/trade)
+    #     +ADX gate              8,133 trades  49.85%  -1008  (-0.1239/trade)
+    #     +ADX gate +agreement   8,010 trades  50.10%   -875  (-0.1093/trade)
+    # The house margin at a true coin flip is -0.1151/trade, so pure PDF was
+    # WORSE than random and the gates bring it back to roughly neutral. They
+    # remove harm; they do not create an edge. 50.10% still loses to 51.99%.
+
+    # Do not trade a market with no trend. ADX below 20 is ADX's own
+    # definition of ranging, and because the PDF adds direction-blind ADX as a
+    # POSITIVE term, a weak trend dragged the score down across the FALL
+    # threshold - so the bot bought PUT *because* nothing was trending. That
+    # was 31% of the first 70 live trades, 21 of 22 of them PUT.
+    min_adx: 20.0
+
+    # With ADX gating entry, it no longer belongs in the directional score.
+    # 'gate' recomputes the composite from the four directional components,
+    # renormalised so 0-100 and the thresholds keep their meaning.
+    adx_mode: gate
+
+    # Both directional components must point the same way. An average of a
+    # bull case and a bear case is not a forecast - it commits to whichever
+    # weighed more. That was 10% of live trades.
+    require_agreement: true
     # 5 minutes. Long enough that the 3.83% margin is not being paid every
     # few seconds, short enough to accumulate a readable sample in a day.
     duration_seconds: 300

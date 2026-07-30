@@ -100,6 +100,37 @@ def adx_subscore(value: float | None) -> float:
     return 1.0
 
 
+# Weights with ADX REMOVED from the directional score and the remaining four
+# renormalised back to 1.0, so the composite still spans 0-100 and the
+# thresholds keep their meaning.
+#
+# WHY THIS EXISTS. ADX is direction-blind - it measures trend STRENGTH - but
+# section 3.2 adds it as a POSITIVE term, so a weak trend drags the composite
+# DOWN toward the FALL threshold. The bot then buys PUT *because there is no
+# trend*, which is not a bearish statement about anything. Measured on the
+# first 70 live trades: 31% fired with ADX below 20, ADX's own no-trend
+# threshold, and 21 of those 22 were PUT. That is the artefact, not a signal.
+#
+# So ADX moves to where it belongs: a GATE on whether to trade at all.
+_GATED_WEIGHTS = {"ema": 0.25 / 0.80, "rsi": 0.20 / 0.80,
+                  "bb": 0.20 / 0.80, "candle": 0.15 / 0.80}
+
+
+def directional_agreement(ema_sub: float, rsi_sub: float) -> bool:
+    """Do the two DIRECTIONAL sub-scores point the same way?
+
+    EMA and RSI are the only two components carrying a direction; bb is
+    mostly neutral and candle is weak. When those two disagree the composite
+    is an average of a bull and a bear case, and trading it commits to
+    whichever happened to weigh more. Measured live: 10% of trades.
+
+    Exactly 0.5 counts as no opinion, so it agrees with nothing.
+    """
+    if ema_sub == 0.5 or rsi_sub == 0.5:
+        return False
+    return (ema_sub > 0.5) == (rsi_sub > 0.5)
+
+
 def composite_score(candles: Sequence[dict[str, Any]], *, ema_fast: int = 5,
                     ema_slow: int = 20, rsi_period: int = 14,
                     bb_period: int = 20, bb_std: float = 2.0,
@@ -134,8 +165,11 @@ def composite_score(candles: Sequence[dict[str, Any]], *, ema_fast: int = 5,
     }
     score = (subs["ema"] * 0.25 + subs["rsi"] * 0.20 + subs["bb"] * 0.20 +
              subs["adx"] * 0.20 + subs["candle"] * 0.15) * 100
-    return {"score": score, **{f"{k}_score": v for k, v in subs.items()},
-            "adx_value": a[-1], "rsi_value": r[-1]}
+    gated = sum(subs[k] * w for k, w in _GATED_WEIGHTS.items()) * 100
+    return {"score": score, "gated_score": gated,
+            **{f"{k}_score": v for k, v in subs.items()},
+            "adx_value": a[-1], "rsi_value": r[-1],
+            "agree": directional_agreement(subs["ema"], subs["rsi"])}
 
 
 class PdfRiseFall(Strategy):
@@ -153,9 +187,20 @@ class PdfRiseFall(Strategy):
     def __init__(self, rise_threshold: float = 72.0, fall_threshold: float = 44.0,
                  rise_confirm: float = 68.0, fall_confirm: float = 48.0,
                  duration_seconds: int = 300, confirm: bool = True,
-                 ema_fast: int = 5, ema_slow: int = 20):
+                 ema_fast: int = 5, ema_slow: int = 20,
+                 min_adx: float = 0.0, require_agreement: bool = False,
+                 adx_mode: str = "score"):
         if not 0 <= fall_threshold < rise_threshold <= 100:
             raise ValueError("need 0 <= fall_threshold < rise_threshold <= 100")
+        if adx_mode not in ("score", "gate"):
+            raise ValueError("adx_mode must be 'score' or 'gate'")
+        if min_adx < 0:
+            raise ValueError("min_adx must be >= 0")
+        # Defaults reproduce the PDF exactly, so the specification stays
+        # testable as written. The config turns the guards on.
+        self.min_adx = float(min_adx)
+        self.require_agreement = bool(require_agreement)
+        self.adx_mode = adx_mode
         self.rise_threshold = rise_threshold
         self.fall_threshold = fall_threshold
         self.rise_confirm = rise_confirm
@@ -173,7 +218,19 @@ class PdfRiseFall(Strategy):
         now = self.score_at(candles)
         if now is None:
             return None
-        s = now["score"]
+
+        # GATE 1: is there a trend at all? Below ADX 20 the market is ranging
+        # by ADX's own definition, and a direction-blind strength number has
+        # no business pushing a directional score either way.
+        if self.min_adx > 0 and now["adx_value"] < self.min_adx:
+            return None
+
+        # GATE 2: do the two directional components agree? An average of a
+        # bull case and a bear case is not a forecast.
+        if self.require_agreement and not now["agree"]:
+            return None
+
+        s = now["gated_score"] if self.adx_mode == "gate" else now["score"]
 
         direction = 0
         if s >= self.rise_threshold:
@@ -187,7 +244,7 @@ class PdfRiseFall(Strategy):
             prev = self.score_at(candles[:-1])
             if prev is None:
                 return None
-            p = prev["score"]
+            p = prev["gated_score"] if self.adx_mode == "gate" else prev["score"]
             ok = (p >= self.rise_confirm) if direction > 0 else (p <= self.fall_confirm)
             if not ok:
                 return None
@@ -200,10 +257,11 @@ class PdfRiseFall(Strategy):
             expected_move_pct=0.001,
             horizon_seconds=self.duration_seconds,
             confidence=1.0,
-            reason=(f"pdf score {s:.1f} "
+            reason=(f"pdf score {s:.1f} [{self.adx_mode}] "
                     f"(ema {now['ema_score']:.2f} rsi {now['rsi_score']:.2f} "
                     f"bb {now['bb_score']:.2f} adx {now['adx_score']:.2f} "
-                    f"candle {now['candle_score']:.2f}, ADX={now['adx_value']:.1f})"),
+                    f"candle {now['candle_score']:.2f}, ADX={now['adx_value']:.1f}, "
+                    f"agree={now['agree']})"),
         )
 
 
@@ -267,6 +325,87 @@ def signals_from_series(scores: Sequence[float | None], *,
             p = scores[i - 1] if i > 0 else None
             if p is None:
                 continue
+            if d > 0 and p < rise_confirm:
+                continue
+            if d < 0 and p > fall_confirm:
+                continue
+        out[i] = d
+    return out
+
+
+def score_series_detail(candles: Sequence[dict[str, Any]], *, ema_fast: int = 5,
+                        ema_slow: int = 20, rsi_period: int = 14,
+                        bb_period: int = 20, bb_std: float = 2.0,
+                        adx_period: int = 14) -> list[dict[str, Any] | None]:
+    """Per-candle score PLUS the gate inputs, one pass over the indicators.
+
+    `score_series` returns only the PDF composite, which is not enough to
+    backtest the gated variant - that needs the raw ADX value and whether the
+    directional components agree. Same single-pass arithmetic; a test asserts
+    it matches `composite_score` candle by candle, because a fast path nobody
+    checked is just an untested second implementation.
+    """
+    n = len(candles)
+    out: list[dict[str, Any] | None] = [None] * n
+    if n == 0:
+        return out
+
+    closes = [float(c["close"]) for c in candles]
+    fast = ema(closes, ema_fast)
+    slow = ema(closes, ema_slow)
+    r = rsi(closes, rsi_period)
+    lower, _mid, upper = bollinger(closes, bb_period, bb_std)
+    a = adx(candles, adx_period)
+    need = max(ema_slow, bb_period, adx_period * 2 + 1, rsi_period + 1) + 2
+
+    for i in range(n):
+        if i + 1 < need or fast[i] is None or slow[i] is None or a[i] is None:
+            continue
+        subs = {
+            "ema": ema_subscore(fast[i], slow[i], fast[i - 1], slow[i - 1]),
+            "rsi": rsi_subscore(r[i]),
+            "bb": bb_subscore(closes[i], lower[i], upper[i]),
+            "adx": adx_subscore(a[i]),
+            "candle": CANDLE_SCORES[candle_pattern(candles[max(0, i - 2): i + 1])],
+        }
+        out[i] = {
+            "score": (subs["ema"] * 0.25 + subs["rsi"] * 0.20 + subs["bb"] * 0.20 +
+                      subs["adx"] * 0.20 + subs["candle"] * 0.15) * 100,
+            "gated_score": sum(subs[k] * w for k, w in _GATED_WEIGHTS.items()) * 100,
+            "adx_value": a[i],
+            "agree": directional_agreement(subs["ema"], subs["rsi"]),
+        }
+    return out
+
+
+def signals_from_detail(detail: Sequence[dict[str, Any] | None], *,
+                        rise_threshold: float = 72.0, fall_threshold: float = 44.0,
+                        rise_confirm: float = 68.0, fall_confirm: float = 48.0,
+                        confirm: bool = True, adx_mode: str = "score",
+                        min_adx: float = 0.0,
+                        require_agreement: bool = False) -> list[int]:
+    """+1 / -1 / 0 per candle, applying the thresholds AND the two gates."""
+    key = "gated_score" if adx_mode == "gate" else "score"
+    out = [0] * len(detail)
+    for i, row in enumerate(detail):
+        if row is None:
+            continue
+        if min_adx > 0 and row["adx_value"] < min_adx:
+            continue
+        if require_agreement and not row["agree"]:
+            continue
+        s = row[key]
+        if s >= rise_threshold:
+            d = 1
+        elif s <= fall_threshold:
+            d = -1
+        else:
+            continue
+        if confirm:
+            prev = detail[i - 1] if i > 0 else None
+            if prev is None:
+                continue
+            p = prev[key]
             if d > 0 and p < rise_confirm:
                 continue
             if d < 0 and p > fall_confirm:
