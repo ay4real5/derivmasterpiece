@@ -38,6 +38,41 @@ PowerShell required**, the same as the digit bot:
 Get-Content risefall_live.log -Tail 20 -Wait   # watch it
 ```
 
+### Changing settings: always redeploy, never assume
+
+```powershell
+python -m tools.check_deploy      # is the RUNNING bot what the config says?
+.\tools\redeploy.ps1              # restart, and prove the new settings took
+```
+
+`check_deploy` reads intent from `config.risefall.yaml` and **fact** from
+`risefall_live.log`, exiting non-zero on any disagreement. Run it after every
+config change.
+
+This is not ceremony. Three config changes — the 700/700 caps, the 3-tick
+expiry, the ladder — were once committed, tested and reported as live while the
+trading process kept the old 5-minute flat-stake settings for over an hour, and
+every individual step reported success:
+
+- Killing by `CommandLine` matches **nothing**: that field (and
+  `ExecutablePath`) is empty for task-owned processes from a non-elevated
+  session, so the matcher silently matched zero processes.
+- `Start-ScheduledTask` then returned `0x80070420` *"already running"* because
+  `MultipleInstances: IgnoreNew`, and nobody checked the code.
+- Deleting the lock file **disarms** the single-instance guard rather than
+  stopping anything, since the lock is only read at startup — which let a manual
+  session trade in parallel with the task-owned bot.
+
+`redeploy.ps1` stops by task handle, polls until the process tree is confirmed
+gone **by pid**, clears the lock only then, checks the start result, and reads
+the log back. Its own first run showed why the polling matters:
+`Stop-ScheduledTask` reported `Ready` while two processes lingered ~14 seconds
+longer.
+
+Worth knowing: the supervisor relaunches its child every 30 minutes, so **child**
+settings (expiry, staking) land on their own eventually, but **supervisor**
+settings (the caps) need a real restart.
+
 ### The two reports, and what they concluded
 
 - **[TICK_ANALYSIS.md](TICK_ANALYSIS.md)** — 260 statistical tests on 864,000
