@@ -79,7 +79,17 @@ def day_pnl(journal_path: str, day: date) -> float:
                 total += float(raw)
             except ValueError:
                 continue
-    return total
+    # ROUNDED TO CENTS, and this is not cosmetic. Summing several hundred
+    # float profits accumulates error, and the daily cap is an exact
+    # comparison against that sum. Live on 2026-07-30 the total came to
+    # -899.9999999999989 against a 900.00 cap: 1.1e-12 short, so `pnl <= -900`
+    # was False and the supervisor kept reporting "within limits, launching".
+    # Each child then found no budget to stake, exited after 4s, and was
+    # relaunched - a restart loop that would have run for the remaining 3.9
+    # hours of the day with the cap silently not applying.
+    #
+    # Money is denominated in cents; the sum of it should be too.
+    return round(total, 2)
 
 
 def last_trade_time(journal_path: str) -> datetime | None:
