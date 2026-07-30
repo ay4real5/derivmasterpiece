@@ -1,0 +1,50 @@
+# Rise/Fall only. Separate file so the digit bot and the multiplier pricebot
+# are both untouched and can keep running alongside this.
+app_id: 33ULSRYkmDK8Y515CmE1l
+currency: USD
+journal_path: risefall_journal.csv
+
+pricebot:
+  instrument: rise_fall
+
+  # Five symbols, the whole R family. Spread rather than concentrated: when
+  # selection was pointed at a single "best" symbol earlier in this project it
+  # put every trade on one market and one contract type, which is worse on
+  # every axis - no diversification of the losing runs, and no way to tell a
+  # bad symbol from a bad strategy.
+  #
+  # Measured payouts at a 3.00 stake, 5-minute expiry (all quoted live):
+  #     R_10  R_25  R_50  R_75   1.9233x -> break-even 51.99%, margin 3.99%
+  #     R_100                    1.9267x -> break-even 51.90%, margin 3.81%
+  # R_100 is marginally the cheapest of the family, which is why it is the
+  # fifth rather than a 1HZ symbol at the same price.
+  #
+  # Rise/Fall on synthetics is the cheapest Rise/Fall Deriv sells - 3.8-4.0%,
+  # against 7.13% on forex at one day and 16.64% on gold at fifteen minutes -
+  # so if this is going to be traded, here is where it costs least.
+  symbols: [R_10, R_25, R_50, R_75, R_100]
+
+  # Flat stake, no ladder. A recovery ladder pushes size into losing runs,
+  # which is exactly backwards when each contract has a fixed negative
+  # expectation; the digit bot's own journal showed losses exceeding its
+  # house edge for that reason.
+  stake: 3.00
+  max_stake: 3.00
+
+  # One-minute candles. The PDF needs about 50 of them warmed up before ADX
+  # means anything, and `measure_symbol` fetches 500.
+  granularity: 60
+  poll_seconds: 30
+
+  strategy:
+    name: pdf_rise_fall
+    # Section 3.2 thresholds, unchanged. Nothing here is tuned - the point of
+    # running it is to measure the specification as written.
+    rise_threshold: 72.0
+    fall_threshold: 44.0
+    rise_confirm: 68.0
+    fall_confirm: 48.0
+    confirm: true
+    # 5 minutes. Long enough that the 3.83% margin is not being paid every
+    # few seconds, short enough to accumulate a readable sample in a day.
+    duration_seconds: 300

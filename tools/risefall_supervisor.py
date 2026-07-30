@@ -45,14 +45,24 @@ def log(msg: str, stream=None) -> None:
     print(f"[{stamp}] {msg}", file=out, flush=True)
 
 
+# Windows console-control events are delivered to every process sharing a
+# console, so a child launched normally dies with STATUS_CONTROL_C_EXIT
+# (0xC000013A = 3221225786) when whatever started the supervisor goes away.
+# That is exactly how the first five-symbol session died one second after
+# opening. CREATE_NO_WINDOW gives the child no console to receive the event.
+CREATE_NO_WINDOW = 0x08000000
+
+
 def run_once(config: str, minutes: float, log_path: str) -> int:
     """One child session. Returns its exit code."""
     cmd = [child_python(), "-u", "run_pricebot.py", "--config", config,
            "--minutes", str(minutes)]
+    flags = CREATE_NO_WINDOW if sys.platform == "win32" else 0
     with open(log_path, "a", encoding="utf-8") as out:
         log(f"starting: {' '.join(cmd)}", out)
         proc = subprocess.Popen(cmd, cwd=REPO, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, bufsize=1)
+                                stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                creationflags=flags)
         assert proc.stdout is not None
         for line in proc.stdout:
             out.write(line)
@@ -60,6 +70,70 @@ def run_once(config: str, minutes: float, log_path: str) -> int:
         proc.wait()
         log(f"child exited with {proc.returncode}", out)
         return proc.returncode
+
+
+LOCK_PATH = os.path.join(REPO, ".risefall_supervisor.lock")
+
+
+def stale_lock(pid_text: str, pid_alive) -> bool:
+    """Is a recorded pid safe to take over? Pure so it can be tested.
+
+    A lock left behind by a killed process must not block startup forever -
+    that turns a crash into a permanent outage. But a lock held by a LIVE
+    process must block, because two supervisors means double the trades and
+    two independent daily-loss caps, so the cap you configured is quietly
+    doubled. That happened: two supervisors and two children were running at
+    once after a restart, each believing it was alone.
+    """
+    text = (pid_text or "").strip()
+    if not text:
+        return True
+    try:
+        pid = int(text)
+    except ValueError:
+        return True                      # unreadable lock is a stale lock
+    if pid == os.getpid():
+        return True
+    return not pid_alive(pid)
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        if sys.platform == "win32":
+            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                                 capture_output=True, text=True, timeout=15)
+            return str(pid) in (out.stdout or "")
+        os.kill(pid, 0)
+        return True
+    except Exception:                     # noqa: BLE001 - unknown means gone
+        return False
+
+
+def acquire_lock() -> bool:
+    """Claim single-instance ownership, or return False if someone else has it."""
+    existing = ""
+    if os.path.exists(LOCK_PATH):
+        try:
+            with open(LOCK_PATH, encoding="utf-8") as fh:
+                existing = fh.read()
+        except OSError:
+            existing = ""
+    if existing and not stale_lock(existing, _pid_alive):
+        return False
+    with open(LOCK_PATH, "w", encoding="utf-8") as fh:
+        fh.write(str(os.getpid()))
+    return True
+
+
+def release_lock() -> None:
+    try:
+        with open(LOCK_PATH, encoding="utf-8") as fh:
+            if fh.read().strip() == str(os.getpid()):
+                os.remove(LOCK_PATH)
+    except OSError:
+        pass
 
 
 def verdict(pnl: float, max_loss: float, target: float) -> str:
@@ -103,9 +177,21 @@ def main() -> None:
     journal = os.path.join(REPO, args.journal)
     failures = 0
 
+    if not acquire_lock():
+        log("another supervisor already holds the lock - exiting rather than "
+            "doubling the trade rate and the daily-loss cap")
+        return
+
     log(f"supervisor up | config={args.config} cap={args.max_daily_loss} "
         f"target={args.target_profit or 'none'} session={args.minutes}m")
 
+    try:
+        _loop(args, journal, log_path, failures)
+    finally:
+        release_lock()
+
+
+def _loop(args, journal: str, log_path: str, failures: int) -> None:
     while True:
         today = date.today() if False else datetime.now(timezone.utc).date()
         pnl = day_pnl(journal, today)

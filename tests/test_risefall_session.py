@@ -182,3 +182,52 @@ def test_break_even_win_rate_is_the_inverse_of_the_payout_multiple():
     from pricebot.rise_fall_backtest import break_even_win_rate
     assert break_even_win_rate(1.9231) == pytest.approx(0.52, abs=0.001)
     assert break_even_win_rate(1.78) == pytest.approx(0.5618, abs=0.001)
+
+
+# --- the shipped configuration, as a contract ------------------------------
+
+def test_shipped_config_runs_exactly_five_symbols():
+    """Five was chosen deliberately. A silent drop to one is the failure this
+    project already had once, when 'best symbol' selection put every trade on
+    R_10 DIGITOVER and there was no way to tell a bad symbol from a bad
+    strategy."""
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    syms = cfg["pricebot"]["symbols"]
+    assert len(syms) == 5, f"expected 5 symbols, got {len(syms)}: {syms}"
+    assert len(set(syms)) == 5, "symbols must be distinct"
+
+
+def test_shipped_config_is_rise_fall_only():
+    """No digits, no multipliers, no touch - Rise/Fall was the request."""
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    assert cfg["pricebot"]["instrument"] == RISE_FALL
+
+
+def test_every_shipped_symbol_maps_to_call_or_put():
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    for sym in cfg["pricebot"]["symbols"]:
+        for d in (1, -1):
+            p = build_proposal(_sig(d), RISE_FALL, sym, 3.0)
+            assert p["contract_type"] in ("CALL", "PUT")
+            assert p["underlying_symbol"] == sym
+
+
+@pytest.mark.asyncio
+async def test_session_considers_all_five_symbols_each_cycle():
+    """One flat symbol must not stop the other four being looked at."""
+    cfg = yaml.safe_load(open("config.risefall.yaml", encoding="utf-8"))
+    api = FakeAPI()
+    seen = []
+
+    class Tracking(FakeAPI):
+        async def candles(self, symbol, granularity=60, count=500):
+            seen.append(symbol)
+            return await FakeAPI.candles(self, symbol, granularity, count)
+
+    sess = Session(api=Tracking(), config=cfg, journal=FakeJournal())
+    await sess.run(0)                      # one pass, deadline already past
+    # run() with 0 seconds does not enter the loop, so drive one cycle directly
+    seen.clear()
+    import asyncio
+    await asyncio.gather(*(sess._consider(s) for s in sess.symbols))
+    assert set(seen) == set(cfg["pricebot"]["symbols"])

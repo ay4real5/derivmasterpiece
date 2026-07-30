@@ -83,3 +83,49 @@ def test_backoff_is_bounded_and_gives_up():
     assert MAX_CONSECUTIVE_FAILURES > 0
     assert all(s > 0 for s in BACKOFF_SECONDS)
     assert list(BACKOFF_SECONDS) == sorted(BACKOFF_SECONDS), "backoff must grow"
+
+
+# --- single instance -------------------------------------------------------
+
+def test_live_pid_holds_the_lock():
+    """Two supervisors means double trades AND two independent daily caps, so
+    the cap you configured is silently doubled. This actually happened."""
+    from tools.risefall_supervisor import stale_lock
+    assert stale_lock("4321", lambda pid: True) is False
+
+
+def test_dead_pid_releases_the_lock():
+    """A crash must not become a permanent outage."""
+    from tools.risefall_supervisor import stale_lock
+    assert stale_lock("4321", lambda pid: False) is True
+
+
+def test_unreadable_lock_is_treated_as_stale():
+    from tools.risefall_supervisor import stale_lock
+    for junk in ("", "   ", "not-a-pid", "12.5"):
+        assert stale_lock(junk, lambda pid: True) is True
+
+
+def test_our_own_pid_never_blocks_us():
+    import os
+    from tools.risefall_supervisor import stale_lock
+    assert stale_lock(str(os.getpid()), lambda pid: True) is True
+
+
+def test_pid_alive_says_no_for_nonsense_pids():
+    from tools.risefall_supervisor import _pid_alive
+    assert _pid_alive(0) is False
+    assert _pid_alive(-5) is False
+
+
+def test_pid_alive_finds_this_process():
+    import os
+    from tools.risefall_supervisor import _pid_alive
+    assert _pid_alive(os.getpid()) is True
+
+
+def test_child_is_launched_without_a_console():
+    """STATUS_CONTROL_C_EXIT killed a session one second after it opened
+    because console-control events reach every process sharing a console."""
+    from tools.risefall_supervisor import CREATE_NO_WINDOW
+    assert CREATE_NO_WINDOW == 0x08000000

@@ -9,11 +9,25 @@ an explicit, separate step you take on purpose.
 
 Three bots and two research reports. All on demo.
 
-| | config | supervisor | journal | log |
-|---|---|---|---|---|
-| **Digit bot** (Over/Under, Even/Odd) | `config.yaml` | `tools/supervisor.py` | `trade_journal.csv` | `scan_trade_live.log` |
-| **Rise/Fall bot** (PDF strategy) | `config.risefall.yaml` | `tools/risefall_supervisor.py` | `risefall_journal.csv` | `risefall_live.log` |
-| **Multiplier pricebot** | `config.pricebot.yaml` | run manually | `pricebot_journal.csv` | — |
+**The Rise/Fall bot is the only one running.** The digit bot's scheduled task
+is disabled - its code and journal are untouched on the `digit-bot` branch and
+it can be re-enabled at any time.
+
+| | status | config | supervisor | journal | log |
+|---|---|---|---|---|---|
+| **Rise/Fall bot** (PDF strategy) | **RUNNING** | `config.risefall.yaml` | `tools/risefall_supervisor.py` | `risefall_journal.csv` | `risefall_live.log` |
+| Digit bot (Over/Under, Even/Odd) | disabled | `config.yaml` | `tools/supervisor.py` | `trade_journal.csv` | `scan_trade_live.log` |
+| Multiplier pricebot | manual only | `config.pricebot.yaml` | — | `pricebot_journal.csv` | — |
+
+Rise/Fall runs **five symbols** - R_10, R_25, R_50, R_75, R_100 - at a flat
+3.00 stake with a 100/day realised-loss cap, 5-minute expiries, and no ladder.
+Measured payouts: 1.9233x on the first four (break-even 51.99%) and 1.9267x on
+R_100 (break-even 51.90%), which is why R_100 is the fifth rather than a 1HZ
+symbol at the same price.
+
+Only one supervisor can run at a time, enforced by a pid lock. Two would double
+the trade rate *and* give each its own daily-loss cap, silently doubling the
+limit - which happened once before the lock existed.
 
 Install the Rise/Fall bot so it survives logoff and reboot — **elevated
 PowerShell required**, the same as the digit bot:
