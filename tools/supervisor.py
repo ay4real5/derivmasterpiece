@@ -56,8 +56,39 @@ def utc_today() -> date:
     return datetime.now(timezone.utc).date()
 
 
-def day_pnl(journal_path: str, day: date) -> float:
+DAY_RESET_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".day_reset")
+
+
+def read_day_reset(path: str = DAY_RESET_PATH, day: date | None = None) -> str | None:
+    """The timestamp today's PnL should be counted FROM, or None.
+
+    A deliberate, recorded way to give the day a fresh budget without touching
+    the journal. Editing the journal would destroy real trade history and make
+    every later analysis wrong; a marker leaves the record intact and is
+    trivially reversible.
+
+    Scoped to its own UTC day on purpose: a marker left from yesterday must not
+    silently suppress today's losses. That would turn a one-off reset into a
+    permanently disabled cap, which is the opposite of what it is for.
+    """
+    day = day or utc_today()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            stamp = fh.read().strip()
+    except OSError:
+        return None
+    if not stamp.startswith(day.isoformat()):
+        return None
+    return stamp
+
+
+def day_pnl(journal_path: str, day: date, since: str | None = None) -> float:
     """Realised PnL booked on `day` (UTC), read back from the journal.
+
+    `since` counts only trades AFTER that timestamp - used by the day-reset
+    marker to hand the rest of the day a fresh budget without rewriting
+    history.
 
     Missing file, header row, dry-run rows with a blank profit and any
     half-written final line are all skipped rather than raising — the
@@ -71,6 +102,8 @@ def day_pnl(journal_path: str, day: date) -> float:
         for row in csv.DictReader(fh):
             stamp = (row.get("timestamp") or "").strip()
             if not stamp.startswith(prefix):
+                continue
+            if since is not None and stamp <= since:
                 continue
             raw = (row.get("profit") or "").strip()
             if not raw:
@@ -455,7 +488,7 @@ def _run() -> None:
 
     backoff = MIN_BACKOFF
     while True:
-        pnl = day_pnl(journal_path, utc_today())
+        pnl = day_pnl(journal_path, utc_today(), since=read_day_reset())
         # on_target=continue must apply here too, not only to the child's stop
         # reason. It previously did not: the child was relaunched past its
         # target, but this day-level check then halted for the rest of the UTC

@@ -100,3 +100,86 @@ def test_a_refused_stake_stops_the_session():
     to be below MIN_STAKE or the refusal would silently become a tiny bet."""
     from main import MIN_STAKE
     assert 0.0 < MIN_STAKE
+
+
+# --- the nine-rung ladder with a repeated top -------------------------------
+
+SEQ9 = [3, 3.25, 6.77, 14.10, 29.36, 61.13, 127.29, 265.05, 265.05]
+
+
+def ladder9(losses=0):
+    s = RecoveryLadder(assumed_net_multiplier=0.9233, reset_after_losses=9,
+                       sequence=list(SEQ9))
+    for _ in range(losses):
+        s.record(-1.0)
+    return s
+
+
+def test_the_ninth_rung_repeats_the_eighth_rather_than_exceeding_it():
+    """A true ninth would be 509.95 / 0.9233 = 552.31. The cap on stake size
+    is the whole point of repeating instead."""
+    assert ladder9(losses=7).stake_for(3.0, 0.9233, 10_000.0) == pytest.approx(265.05)
+    assert ladder9(losses=8).stake_for(3.0, 0.9233, 10_000.0) == pytest.approx(265.05)
+
+
+def test_no_rung_ever_exceeds_the_capped_maximum():
+    for i in range(len(SEQ9) + 3):
+        got = ladder9(losses=i).stake_for(3.0, 0.9233, 10_000.0)
+        assert got <= 265.05 + 0.005, f"rung {i} staked {got}"
+
+
+def test_it_wraps_to_the_base_after_nine_losses():
+    assert ladder9(losses=9).stake_for(3.0, 0.9233, 10_000.0) == pytest.approx(3.0)
+
+
+def test_a_win_at_any_rung_resets_to_base():
+    s = ladder9(losses=5)
+    s.record(+10.0)
+    assert s.stake_for(3.0, 0.9233, 10_000.0) == pytest.approx(3.0)
+
+
+def test_the_full_cycle_fits_the_configured_daily_cap():
+    """A ladder that cannot complete inside the cap takes every loss climbing
+    and then has its recovery rung refused - hit twice in this project."""
+    import yaml
+    cfg = yaml.safe_load(open("config.yaml", encoding="utf-8"))
+    seq = cfg["staking"]["sequence"]
+    cap = cfg["risk"]["max_daily_loss"]
+    assert sum(seq) < cap, f"ladder {sum(seq)} does not fit cap {cap}"
+
+
+def test_the_shipped_ladder_matches_the_nine_rung_shape():
+    import yaml
+    cfg = yaml.safe_load(open("config.yaml", encoding="utf-8"))
+    seq = cfg["staking"]["sequence"]
+    assert len(seq) == 9
+    assert cfg["staking"]["reset_after_losses"] == len(seq)
+    assert seq[-1] == seq[-2], "the ninth rung must repeat the eighth"
+
+
+def test_rungs_two_to_eight_still_recover_their_run():
+    """The repeat breaks the recovery property at rung 9 ONLY - every earlier
+    rung must still win back everything staked before it.
+
+    Checked to 1%, not to the cent. The sequence is an explicit rounded ladder
+    (each rung is a real stake, quoted to 2dp) originally derived at
+    net=0.9231, so recomputing it from 0.9233 drifts slightly and the drift
+    compounds - the config says as much. Asserting to the cent would be
+    testing the arithmetic of the derivation rather than the property that
+    matters, which is that each rung really does cover the run before it.
+    """
+    net = 0.9233
+    for i in range(1, 8):
+        want = sum(SEQ9[:i]) / net
+        assert SEQ9[i] == pytest.approx(want, rel=0.01), (
+            f"rung {i + 1} is {SEQ9[i]}, needs about {want:.2f} to recover "
+            f"the {sum(SEQ9[:i]):.2f} staked before it")
+
+
+def test_the_ninth_rung_is_knowingly_a_partial_recovery():
+    """Documents the accepted trade-off rather than pretending it recovers."""
+    net = 0.9233
+    down_after_8 = sum(SEQ9[:8])
+    recovered = SEQ9[8] * net
+    assert recovered < down_after_8
+    assert down_after_8 - recovered == pytest.approx(265.23, abs=0.5)
