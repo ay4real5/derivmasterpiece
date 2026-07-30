@@ -29,6 +29,7 @@ from datetime import date, datetime, timezone
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
+from tools import lockfile  # noqa: E402
 from tools.supervisor import child_python, day_pnl  # noqa: E402
 
 # A crash loop is a bug, not a market condition: retrying it fast just fills
@@ -91,68 +92,28 @@ def run_once(config: str, minutes: float, log_path: str) -> int:
         return proc.returncode
 
 
-LOCK_PATH = os.path.join(REPO, ".risefall_supervisor.lock")
+# One shared lock implementation, in tools/lockfile.py. This module used to
+# carry its own copy while tools/supervisor.py had none at all - which is
+# precisely how two digit-bot supervisors ended up trading side by side. The
+# names below are kept as thin aliases so existing callers and tests do not
+# have to move.
+LOCK_PATH = lockfile.lock_path(REPO, "risefall_supervisor")
 
 
 def stale_lock(pid_text: str, pid_alive) -> bool:
-    """Is a recorded pid safe to take over? Pure so it can be tested.
-
-    A lock left behind by a killed process must not block startup forever -
-    that turns a crash into a permanent outage. But a lock held by a LIVE
-    process must block, because two supervisors means double the trades and
-    two independent daily-loss caps, so the cap you configured is quietly
-    doubled. That happened: two supervisors and two children were running at
-    once after a restart, each believing it was alone.
-    """
-    text = (pid_text or "").strip()
-    if not text:
-        return True
-    try:
-        pid = int(text)
-    except ValueError:
-        return True                      # unreadable lock is a stale lock
-    if pid == os.getpid():
-        return True
-    return not pid_alive(pid)
+    return lockfile.stale(pid_text, pid_alive)
 
 
 def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        if sys.platform == "win32":
-            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                                 capture_output=True, text=True, timeout=15)
-            return str(pid) in (out.stdout or "")
-        os.kill(pid, 0)
-        return True
-    except Exception:                     # noqa: BLE001 - unknown means gone
-        return False
+    return lockfile.pid_alive(pid)
 
 
 def acquire_lock() -> bool:
-    """Claim single-instance ownership, or return False if someone else has it."""
-    existing = ""
-    if os.path.exists(LOCK_PATH):
-        try:
-            with open(LOCK_PATH, encoding="utf-8") as fh:
-                existing = fh.read()
-        except OSError:
-            existing = ""
-    if existing and not stale_lock(existing, _pid_alive):
-        return False
-    with open(LOCK_PATH, "w", encoding="utf-8") as fh:
-        fh.write(str(os.getpid()))
-    return True
+    return lockfile.acquire(LOCK_PATH)
 
 
 def release_lock() -> None:
-    try:
-        with open(LOCK_PATH, encoding="utf-8") as fh:
-            if fh.read().strip() == str(os.getpid()):
-                os.remove(LOCK_PATH)
-    except OSError:
-        pass
+    lockfile.release(LOCK_PATH)
 
 
 def verdict(pnl: float, max_loss: float, target: float) -> str:

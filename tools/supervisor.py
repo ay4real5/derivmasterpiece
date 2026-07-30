@@ -37,6 +37,11 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from alerts import Alert, emit  # noqa: E402  (path set above so this runs as a script)
+# Flat import, matching `alerts` above: this file puts tools/ on sys.path, NOT
+# the repo root, so `from tools.lockfile import ...` fails when the file is run
+# as a script - which is exactly how the scheduled task runs it. The test suite
+# did not catch it because pytest puts the repo root on sys.path itself.
+from lockfile import acquire, ensure_held, lock_path, release  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -345,6 +350,19 @@ def run_once(config: str, log_path: str, daily_pnl_offset: float = 0.0,
 
 
 def main() -> None:
+    """Acquire the single-instance lock, run, and always release it."""
+    lock = lock_path(REPO, "scan_trade_supervisor")
+    if not acquire(lock):
+        log("another scan-trade supervisor already holds the lock - exiting "
+            "rather than doubling the trade rate and the daily-loss cap")
+        return
+    try:
+        _run()
+    finally:
+        release(lock)
+
+
+def _run() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--log", default="scan_trade_live.log")
@@ -360,6 +378,8 @@ def main() -> None:
              "to 'stop' if neither is set.",
     )
     args = ap.parse_args()
+
+    lock = lock_path(REPO, "scan_trade_supervisor")
 
     import yaml  # local import so --help works without deps installed
 
@@ -447,6 +467,14 @@ def main() -> None:
                 return
             time.sleep(wait)
             continue
+
+        # Re-assert ownership before EVERY launch, not just at startup. A lock
+        # deleted by hand mid-run otherwise leaves this supervisor running
+        # unguarded, which is how two of them ended up trading at once.
+        if not ensure_held(lock):
+            log("lost the single-instance lock to another supervisor - "
+                "stopping rather than trading alongside it")
+            return
 
         log(f"today's realised PnL {pnl:+.2f} — within limits, launching")
 

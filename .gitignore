@@ -22,3 +22,4 @@ risefall_live.log
 bybit_cache/
 .risefall_supervisor.lock
 install_task_out.log
+consolidate_out.log
