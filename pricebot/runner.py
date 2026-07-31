@@ -203,7 +203,7 @@ class Session:
             self._log(f"{symbol}: no measurable volatility, skipping")
             return
 
-        signal = self.strategy.evaluate(candles)
+        signal = self.strategy.evaluate(candles, symbol=symbol)
         # A no-view TOUCH signal (direction == 0, positive move: "buy this
         # barrier's win-rate shape, no forecast") is deliberately NOT
         # actionable in the direction/multiplier/rise-fall sense, so the

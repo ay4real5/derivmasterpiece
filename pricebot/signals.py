@@ -70,11 +70,18 @@ class Strategy:
 
     Candles are the newest-last sequence of dicts with open/high/low/close,
     matching what `ticks_history` returns with `style="candles"`.
+
+    `symbol` is OPTIONAL and ignored by every strategy except ones that
+    genuinely need to behave differently per symbol (see `FixedNoTouch`,
+    which sizes its barrier off it) - added as a keyword-only-in-spirit
+    parameter with a default so every existing call site and every existing
+    Strategy subclass keeps working unchanged.
     """
 
     name = "base"
 
-    def evaluate(self, candles: Sequence[dict[str, Any]]) -> Signal | None:
+    def evaluate(self, candles: Sequence[dict[str, Any]],
+                symbol: str | None = None) -> Signal | None:
         raise NotImplementedError
 
 
@@ -88,7 +95,8 @@ class NeverTrade(Strategy):
 
     name = "never"
 
-    def evaluate(self, candles: Sequence[dict[str, Any]]) -> Signal | None:
+    def evaluate(self, candles: Sequence[dict[str, Any]],
+                symbol: str | None = None) -> Signal | None:
         return None
 
 
@@ -109,22 +117,45 @@ class FixedNoTouch(Strategy):
 
     name = "fixed_notouch"
 
-    def __init__(self, barrier_pct: float = 0.30, horizon_seconds: int = 300):
+    def __init__(self, barrier_pct: float = 0.30, horizon_seconds: int = 300,
+                barrier_by_symbol: dict[str, float] | None = None):
+        """`barrier_by_symbol` overrides `barrier_pct` for specific symbols.
+
+        Needed because the same percentage barrier does NOT buy the same
+        win-rate shape on every symbol - confirmed by scan-touch: R_50 and
+        R_75 need different barrier widths (0.30% vs 0.40%) to both land
+        near a ~93-96% NOTOUCH win rate at 5 minutes, since they carry
+        different volatility. A symbol not listed here falls back to the
+        plain `barrier_pct`.
+        """
         if barrier_pct <= 0:
             raise ValueError("barrier_pct must be positive")
         if horizon_seconds <= 0:
             raise ValueError("horizon_seconds must be positive")
+        overrides = dict(barrier_by_symbol or {})
+        for sym, pct in overrides.items():
+            if pct <= 0:
+                raise ValueError(f"barrier_by_symbol[{sym!r}] must be positive")
         self.barrier_pct = barrier_pct
         self.horizon_seconds = horizon_seconds
+        self.barrier_by_symbol = overrides
 
-    def evaluate(self, candles: Sequence[dict[str, Any]]) -> Signal | None:
+    def barrier_for(self, symbol: str | None) -> float:
+        if symbol is None:
+            return self.barrier_pct
+        return self.barrier_by_symbol.get(symbol, self.barrier_pct)
+
+    def evaluate(self, candles: Sequence[dict[str, Any]],
+                symbol: str | None = None) -> Signal | None:
+        barrier = self.barrier_for(symbol)
         return Signal(
             direction=0,
-            expected_move_pct=self.barrier_pct,
+            expected_move_pct=barrier,
             horizon_seconds=self.horizon_seconds,
             confidence=1.0,
-            reason=(f"fixed NOTOUCH barrier {self.barrier_pct:.1%} over "
-                    f"{self.horizon_seconds}s - no prediction, see touch_edge scan"),
+            reason=(f"fixed NOTOUCH barrier {barrier:.2%} over "
+                    f"{self.horizon_seconds}s on {symbol or 'default'} - "
+                    f"no prediction, see touch_edge scan"),
         )
 
 
@@ -148,7 +179,8 @@ class Momentum(Strategy):
         self.min_move_pct = min_move_pct
         self.horizon_seconds = horizon_seconds
 
-    def evaluate(self, candles: Sequence[dict[str, Any]]) -> Signal | None:
+    def evaluate(self, candles: Sequence[dict[str, Any]],
+                symbol: str | None = None) -> Signal | None:
         if len(candles) < self.lookback:
             return None
         window = candles[-self.lookback:]
@@ -178,8 +210,9 @@ class MeanReversion(Momentum):
 
     name = "mean_reversion"
 
-    def evaluate(self, candles: Sequence[dict[str, Any]]) -> Signal | None:
-        sig = super().evaluate(candles)
+    def evaluate(self, candles: Sequence[dict[str, Any]],
+                symbol: str | None = None) -> Signal | None:
+        sig = super().evaluate(candles, symbol)
         if sig is None:
             return None
         return Signal(

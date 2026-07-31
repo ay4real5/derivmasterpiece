@@ -10,7 +10,7 @@
 # has no RiskManager of its own (that is digit-bot-only). It is enforced by
 # tools/risefall_supervisor.py's own --max-daily-loss/--target-profit flags,
 # which read the journal directly - see tools/install_risefall_task.ps1
-# -ConfigPath config.notouch.yaml -MaxDailyLoss 850 -TargetProfit 1000.
+# -ConfigPath config.notouch.yaml -MaxDailyLoss 1000 -TargetProfit 1200.
 app_id: 33ULSRYkmDK8Y515CmE1l
 currency: USD
 journal_path: notouch_journal.csv
@@ -18,30 +18,43 @@ journal_path: notouch_journal.csv
 pricebot:
   instrument: touch
 
-  # R_50 only, chosen from `python main.py scan-touch --symbol R_10 --symbol
-  # R_25 --symbol R_50 --symbol R_75` (see deriv_bot/touch_edge.py). R_75's
-  # quotes came back barrier-insensitive (same ~3.4% NOTOUCH win-rate from a
-  # 0.1% to a 30% barrier at every duration tried) - a real anomaly, not
-  # usable until investigated separately. R_10/R_25 need a much wider
-  # barrier or longer duration than R_50 to reach a comparable win-rate
-  # because they carry less volatility per unit time by construction (they
-  # ARE Volatility 10/25 vs Volatility 50).
-  symbols: [R_50]
+  # FIVE symbols, chosen 2026-07-31 from a full 10-symbol scan-touch sweep
+  # (`python main.py scan-touch --symbol <each of R_10/25/50/75/100 and
+  # 1HZ10V/25V/50V/75V/100V>`), AFTER fixing two real bugs the first sweep
+  # had (see git log: barriers were never scaled by spot, and decimal
+  # precision was hardcoded to 4 instead of each symbol's own pip_size).
+  # With both fixed, all ten symbols behave sensibly - the earlier "R_75 is
+  # barrier-insensitive" finding was entirely an artifact of those two bugs,
+  # not a real anomaly.
+  #
+  # These five all reach a comparable ~93-96% NOTOUCH win rate at the SAME
+  # 5-minute duration this bot already uses (barrier_pct/barrier_by_symbol
+  # below), at the same ~2.3-2.5% margin measured everywhere else in this
+  # project - still a payout SHAPE, not an edge. R_10, R_25, 1HZ10V, 1HZ25V
+  # could reach a similar shape too, but only at longer durations (15m+),
+  # not at this bot's 5-minute cadence - left out rather than mixing
+  # durations across symbols, which the current strategy/config schema
+  # doesn't support cleanly yet.
+  symbols: [R_50, R_75, R_100, 1HZ50V, 1HZ75V]
 
   stake: 3.00
   max_stake: 3.00
 
   # Explicit, not derived from horizon_seconds - Touch, like Rise/Fall, is
-  # all-or-nothing at a deadline, so the duration IS the trade.
+  # all-or-nothing at a deadline, so the duration IS the trade. Same 5m for
+  # every symbol above - only the barrier differs per symbol (see strategy
+  # block), since each symbol needs a different width to reach a comparable
+  # win rate at this SAME duration.
   duration: 5
   duration_unit: m
 
-  # Flat, not a ladder. A NOTOUCH loss is already the full stake (there is
-  # no partial-loss rung to recover from the way a ladder assumes), and the
-  # margin math says every barrier costs the same, so escalating stake after
-  # a loss would only replay the recovery-ladder tail-risk this project has
-  # already measured elsewhere (see OPERATING_STATE.md's 9-rung digit-bot
-  # ladder and its outsized loss days).
+  # Flat, not a ladder, and per-symbol (Session._staker keys by symbol) - a
+  # NOTOUCH loss is already the full stake (there is no partial-loss rung to
+  # recover from the way a ladder assumes), and the margin math says every
+  # barrier costs the same, so escalating stake after a loss would only
+  # replay the recovery-ladder tail-risk this project has already measured
+  # elsewhere (see OPERATING_STATE.md's 9-rung digit-bot ladder and its
+  # outsized loss days).
   staking:
     name: flat
 
@@ -53,14 +66,24 @@ pricebot:
 
   strategy:
     name: fixed_notouch
-    # CORRECTED 2026-07-31: barrier_pct is a genuine fraction of spot as of
-    # this fix (see pricebot/instruments.py's build_proposal - Deriv's
-    # relative barrier is an ABSOLUTE offset, not a fraction, so it must be
-    # scaled by spot before use, which it was NOT before this fix). The
-    # value below (0.27%) reproduces the ~0.30-absolute-offset barrier this
-    # bot actually traded on R_50 (spot ~112) before the fix - i.e. the SAME
-    # real-world barrier as before, not a new one. It is a placeholder while
-    # a fresh scan-touch sweep (now correctly spot-scaled) picks a
-    # deliberate shape rather than one inherited from the bug.
-    barrier_pct: 0.0027
+    # R_50's shape (and the default for anything not listed in
+    # barrier_by_symbol) - measured 2026-07-31: 0.30% barrier, 5m, R_50 ->
+    # 96.5% NOTOUCH win rate, 2.32% margin.
+    barrier_pct: 0.003
     horizon_seconds: 300
+    # Per-symbol overrides - see pricebot/signals.py::FixedNoTouch. The same
+    # percentage barrier does NOT buy the same win-rate on every symbol;
+    # each value here was picked from the scan-touch sweep to land near the
+    # same ~93-96% win rate as R_50's default, at this bot's 5-minute
+    # duration:
+    #     R_75     0.40% -> 93.5% win, 2.26% margin
+    #     R_100    0.50% -> 91.7% win, 2.52% margin (only two points tested
+    #              at 5m for R_100 - 0.3%->70.4%, 0.5%->91.7% - closest
+    #              available, not finely tuned to 93-96% like the others)
+    #     1HZ75V   0.40% -> 93.5% win, 2.50% margin
+    # 1HZ50V is NOT listed - it uses the R_50 default (0.30%), and measured
+    # the same 96.5% win rate at 5m/0.3% as R_50 itself.
+    barrier_by_symbol:
+      R_75: 0.004
+      R_100: 0.005
+      1HZ75V: 0.004

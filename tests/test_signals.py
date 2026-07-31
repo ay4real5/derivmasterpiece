@@ -131,6 +131,25 @@ def test_fixed_notouch_rejects_bad_parameters():
         FixedNoTouch(barrier_pct=0)
     with pytest.raises(ValueError):
         FixedNoTouch(horizon_seconds=0)
+    with pytest.raises(ValueError):
+        FixedNoTouch(barrier_by_symbol={"R_75": -0.01})
+
+
+def test_fixed_notouch_per_symbol_override():
+    """The same percentage barrier does not buy the same win-rate shape on
+    every symbol (confirmed by scan-touch: R_50 needed 0.30%, R_75 needed
+    0.40%, for a comparable ~93-96% win rate at 5 minutes) - a symbol not
+    listed falls back to the plain barrier_pct."""
+    s = FixedNoTouch(barrier_pct=0.003, barrier_by_symbol={"R_75": 0.004, "R_100": 0.005})
+    assert s.evaluate([], symbol="R_50").expected_move_pct == 0.003   # not overridden
+    assert s.evaluate([], symbol="R_75").expected_move_pct == 0.004
+    assert s.evaluate([], symbol="R_100").expected_move_pct == 0.005
+    assert s.evaluate([]).expected_move_pct == 0.003                  # no symbol at all
+
+
+def test_fixed_notouch_reason_names_the_symbol():
+    sig = FixedNoTouch(barrier_pct=0.003).evaluate([], symbol="R_50")
+    assert "R_50" in sig.reason
 
 
 def test_fixed_notouch_is_registered():

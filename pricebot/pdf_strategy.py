@@ -214,7 +214,8 @@ class PdfRiseFall(Strategy):
         return composite_score(candles, ema_fast=self.ema_fast,
                                ema_slow=self.ema_slow)
 
-    def evaluate(self, candles: Sequence[dict[str, Any]]) -> Signal | None:
+    def evaluate(self, candles: Sequence[dict[str, Any]],
+                symbol: str | None = None) -> Signal | None:
         now = self.score_at(candles)
         if now is None:
             return None
