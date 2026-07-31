@@ -7,47 +7,71 @@ an explicit, separate step you take on purpose.
 
 ## What is in this repo now
 
-Three bots and two research reports. All on demo.
+Four bots and two research reports. All on demo.
 
-**The Rise/Fall bot is the only one running.** The digit bot's scheduled task
-is disabled - its code and journal are untouched on the `digit-bot` branch and
-it can be re-enabled at any time.
+**The NOTOUCH bot is the only one running**, via `tools/risefall_supervisor.py`
+(generic despite the name - it takes `--config`/`--journal`/`--log`, so it
+supervises whichever of these it's pointed at). It **replaced the digit bot**,
+which is now fully stopped (scheduled task removed). The Rise/Fall bot's task
+was never actually installed despite an earlier version of this file claiming
+it was running - see "Docs vs. reality" below for how that was found.
 
 | | status | config | supervisor | journal | log |
 |---|---|---|---|---|---|
-| **Rise/Fall bot** (PDF strategy) | **RUNNING** | `config.risefall.yaml` | `tools/risefall_supervisor.py` | `risefall_journal.csv` | `risefall_live.log` |
-| Digit bot (Over/Under, Even/Odd) | disabled | `config.yaml` | `tools/supervisor.py` | `trade_journal.csv` | `scan_trade_live.log` |
+| **NOTOUCH bot** | **RUNNING** | `config.notouch.yaml` | `tools/risefall_supervisor.py` | `notouch_journal.csv` | `notouch_live.log` |
+| Digit bot (Over/Under, Even/Odd) | **stopped** (task removed) | `config.yaml` | `tools/supervisor.py` | `trade_journal.csv` | `scan_trade_live.log` |
+| Rise/Fall bot (PDF strategy) | not deployed | `config.risefall.yaml` | `tools/risefall_supervisor.py` | `risefall_journal.csv` | `risefall_live.log` |
 | Multiplier pricebot | manual only | `config.pricebot.yaml` | — | `pricebot_journal.csv` | — |
 
-Rise/Fall runs **five symbols** - R_10, R_25, R_50, R_75, R_100 - at a flat
-3.00 stake with a 100/day realised-loss cap, 5-minute expiries, and no ladder.
-Measured payouts: 1.9233x on the first four (break-even 51.99%) and 1.9267x on
-R_100 (break-even 51.90%), which is why R_100 is the fifth rather than a 1HZ
-symbol at the same price.
+NOTOUCH trades **R_50 only**, a fixed 30%-of-spot barrier over a 5-minute
+window, flat 3.00 stake, no ladder. Chosen with `python main.py scan-touch`
+(see `deriv_bot/touch_edge.py`): ~93.5% win rate at ~2.28% margin, cheaper
+than the digit bot's blended ~3.0% (even/rise categories) and, like every
+contract measured in this repo, no better than that margin in expectation -
+a wider barrier buys a higher win rate at the same expected cost, not an
+edge. `-850`/`+1000` daily loss/target caps, matching the digit bot's scale.
 
-Only one supervisor can run at a time, enforced by a pid lock. Two would double
+**Only one supervisor per bot-name lock can run at a time** (`tools/lockfile.py`,
+named per `--config` since `tools/risefall_supervisor.py` started supervising
+more than one bot - previously hardcoded to `risefall_supervisor` regardless
+of config, which would have let this bot and a future re-enabled Rise/Fall
+bot silently share one lock). Two supervisors on the same lock would double
 the trade rate *and* give each its own daily-loss cap, silently doubling the
 limit - which happened once before the lock existed.
 
-Install the Rise/Fall bot so it survives logoff and reboot — **elevated
-PowerShell required**, the same as the digit bot:
+**Docs vs. reality: read `OPERATING_STATE.md`, not this table, when in
+doubt.** `config.yaml`/`config.notouch.yaml`'s actual deployed state can only
+be confirmed from the running scheduled tasks and live logs, not assumed from
+a markdown file - this file previously claimed the Rise/Fall bot was running
+when the digit bot actually was, undetected until a live scheduled-task check
+during this NOTOUCH deployment. `OPERATING_STATE.md` is kept current with
+what `Get-ScheduledTask` and the live logs actually show.
+
+Install the NOTOUCH bot so it survives logoff and reboot — **elevated
+PowerShell required** (`-ExecutionPolicy Bypass` if scripts are blocked in
+that session):
 
 ```powershell
-.\tools\install_risefall_task.ps1              # install and start
-.\tools\install_risefall_task.ps1 -Uninstall   # remove
-Get-Content risefall_live.log -Tail 20 -Wait   # watch it
+.\tools\install_risefall_task.ps1 -TaskName DerivNoTouchSupervisor -ConfigPath config.notouch.yaml -JournalPath notouch_journal.csv -LogPath notouch_live.log -MaxDailyLoss 850 -TargetProfit 1000
+.\tools\install_risefall_task.ps1 -TaskName DerivNoTouchSupervisor -Uninstall
+Get-Content notouch_live.log -Tail 20 -Wait   # watch it
 ```
+
+The same script installs the Rise/Fall bot with its historical defaults
+(`-TaskName DerivRiseFallSupervisor -ConfigPath config.risefall.yaml`, no
+other flags needed) if it's ever re-enabled.
 
 ### Changing settings: always redeploy, never assume
 
 ```powershell
-python -m tools.check_deploy      # is the RUNNING bot what the config says?
+python -m tools.check_deploy --config config.notouch.yaml --log notouch_live.log --cap 850 --target 1000
 .\tools\redeploy.ps1              # restart, and prove the new settings took
 ```
 
-`check_deploy` reads intent from `config.risefall.yaml` and **fact** from
-`risefall_live.log`, exiting non-zero on any disagreement. Run it after every
-config change.
+`check_deploy` reads intent from `--config` and **fact** from `--log`
+(defaults to the Rise/Fall paths - pass the NOTOUCH ones explicitly, as
+above), exiting non-zero on any disagreement. Run it after every config
+change.
 
 This is not ceremony. Three config changes — the 700/700 caps, the 3-tick
 expiry, the ladder — were once committed, tested and reported as live while the
@@ -91,11 +115,18 @@ running results, and the open items.
   charges **16.4%** and the edge is worth about **16.2%**. Deriv has priced it
   at approximately its own value.
 
-**So the Rise/Fall bot is running as a measurement, not as an expected
-money-maker.** Its own backtest returned 49.86% over 15,817 trades against a
-52.0% break-even. It stakes flat, caps the day's loss, and journals every
-trade with the payout multiple and break-even rate on it, so what it actually
-does stays checkable rather than assumed.
+**So the NOTOUCH bot is running as a cost-minimisation measure, not as an
+expected money-maker.** Nothing in this repo has ever found a predictive
+edge on these feeds - TICK_ANALYSIS.md ruled it out at a sensitivity 7x
+finer than the smallest edge that could pay for itself. NOTOUCH's ~93.5%
+win rate is a payout SHAPE bought at Deriv's own quoted margin (~2.28%,
+`python main.py scan-touch`), not a forecast: EV is the same at every
+barrier width, wide or narrow. It stakes flat, caps the day's loss, and
+journals every trade (reconciled against Deriv's own `profit_table` at
+startup - see `pricebot/reconcile.py` - so a trade missed by this
+process's own watcher, or placed by a different machine on the same
+account, still reaches the cap), so what it actually does stays checkable
+rather than assumed.
 
 ## Read this first
 

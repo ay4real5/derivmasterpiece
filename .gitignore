@@ -20,9 +20,13 @@ scratch_*.py
 risefall_journal.csv
 risefall_live.log
 notouch_journal.csv
-.notouch_supervisor.lock
+notouch_live.log
 bybit_cache/
-.risefall_supervisor.lock
+# Any bot's pid lock (tools/lockfile.py) - one per --config, named
+# per-bot since tools/risefall_supervisor.py stopped hardcoding a single
+# name. .scan_trade_supervisor.lock was committed by accident before this
+# pattern existed; this covers whatever bot comes next too.
+.*.lock
 install_task_out.log
 consolidate_out.log
 .day_reset
