@@ -6,8 +6,9 @@ from deriv_bot.touch_edge import margin_and_win_prob, scan_touch
 class FakeAPI:
     """Just enough of DerivAPI for scan_touch to run end to end."""
 
-    def __init__(self, spot: float):
+    def __init__(self, spot: float, pip_size: int = 4):
         self.spot = spot
+        self.pip_size = pip_size
         self.proposal_calls: list[dict] = []
 
     async def list_accounts(self, token):
@@ -23,7 +24,7 @@ class FakeAPI:
         pass
 
     async def ticks_history(self, symbol, count=1):
-        return {"history": {"prices": [self.spot]}, "pip_size": 4}
+        return {"history": {"prices": [self.spot]}, "pip_size": self.pip_size}
 
     async def proposal(self, **params):
         self.proposal_calls.append(params)
@@ -52,6 +53,26 @@ async def test_scan_touch_scales_barriers_by_the_symbols_own_spot(monkeypatch):
     assert len(fake.proposal_calls) == 2  # ONETOUCH + NOTOUCH
     for call in fake.proposal_calls:
         assert call["barrier"] == "+33.6000"  # 0.30 * 112.0
+
+
+@pytest.mark.asyncio
+async def test_scan_touch_respects_the_symbols_own_pip_size(monkeypatch):
+    """The bug this guards: Deriv rejects a barrier with more decimal places
+    than a symbol's own pip_size allows (confirmed live - R_10 caps at 3,
+    1HZ10V at 2), so a universal 4-decimal format silently zeroed out entire
+    symbols from a scan."""
+    import deriv_bot.touch_edge as touch_edge_module
+
+    fake = FakeAPI(spot=9679.64, pip_size=2)
+    monkeypatch.setattr(touch_edge_module, "DerivAPI", lambda app_id: fake)
+
+    await scan_touch(
+        "app123", ["1HZ10V"], 3.0,
+        barrier_pcts=(0.01,), durations=((5, "m"),), token="tok",
+    )
+
+    for call in fake.proposal_calls:
+        assert len(call["barrier"].split(".")[1]) == 2
 
 
 @pytest.mark.asyncio

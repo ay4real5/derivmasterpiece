@@ -31,14 +31,20 @@ def candles(n=30, price=100.0):
 class FakeAPI:
     """Just enough of DerivAPI for `_consider` and `_watch` to run end to end."""
 
-    def __init__(self, settle_delay: float = 0.0):
+    def __init__(self, settle_delay: float = 0.0, pip_size: int = 4):
         self.proposal_calls: list[dict] = []
         self.bought: dict | None = None
         self.contracts_for_calls = 0
         self.settle_delay = settle_delay
+        self.pip_size = pip_size
+        self.ticks_history_calls = 0
 
     async def candles(self, symbol, granularity=60, count=500):
         return candles()
+
+    async def ticks_history(self, symbol, count=1000, style="ticks"):
+        self.ticks_history_calls += 1
+        return {"pip_size": self.pip_size, "history": {"prices": [candles()[-1]["close"]]}}
 
     async def contracts_for(self, symbol):
         self.contracts_for_calls += 1
@@ -114,6 +120,29 @@ async def test_touch_actually_opens_a_position(tmp_path):
     assert api.bought is not None
     assert session.open["R_50"] == 42
     assert session.opened == 1
+
+
+@pytest.mark.asyncio
+async def test_touch_barrier_respects_the_symbols_own_pip_size(tmp_path):
+    """The bug this guards: Deriv rejects R_10 at a 4th decimal place and
+    1HZ10V at a 3rd - a barrier formatted to a universal 4 decimals fails
+    outright on any symbol whose precision is narrower."""
+    api = FakeAPI(pip_size=2)
+    session, _api, journal = make_session(tmp_path, api=api)
+    await session._consider("R_50")
+    journal.close()
+    assert len(api.proposal_calls[0]["barrier"].split(".")[1]) == 2
+
+
+@pytest.mark.asyncio
+async def test_pip_size_is_fetched_once_per_symbol_and_cached(tmp_path):
+    api = FakeAPI()
+    session, _api, journal = make_session(tmp_path, api=api)
+    await session._consider("R_50")
+    session.open.clear()  # simulate the position having settled already
+    await session._consider("R_50")
+    journal.close()
+    assert api.ticks_history_calls == 1
 
 
 @pytest.mark.asyncio

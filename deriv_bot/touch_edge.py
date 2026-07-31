@@ -101,6 +101,7 @@ async def scan_touch(
             try:
                 tick_resp = await api.ticks_history(symbol, count=1)
                 spot = float(tick_resp["history"]["prices"][-1])
+                pip_size = int(tick_resp["pip_size"])
             except Exception:
                 continue  # symbol not quotable right now - skip it entirely
             if spot <= 0:
@@ -112,8 +113,11 @@ async def scan_touch(
                     # string wants an absolute offset, so it has to be
                     # scaled by the current price before formatting - see
                     # DEFAULT_BARRIER_PCTS' docstring for why this matters.
+                    # Decimal places are capped at the symbol's OWN
+                    # pip_size, not a universal 4 - confirmed live, Deriv
+                    # rejects R_10 past 3 places and 1HZ10V past 2.
                     offset = pct * spot
-                    barrier = f"+{offset:.4f}"
+                    barrier = f"+{offset:.{pip_size}f}"
                     base = dict(
                         underlying_symbol=symbol, amount=stake, basis="stake",
                         duration=duration, duration_unit=unit, currency=currency,

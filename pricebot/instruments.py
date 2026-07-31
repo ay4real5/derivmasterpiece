@@ -126,7 +126,8 @@ def build_proposal(signal: Signal, instrument: str, symbol: str, stake: float,
                    commission: float = 0.0,
                    duration: int | None = None,
                    duration_unit: str | None = None,
-                   spot: float | None = None) -> dict[str, Any] | None:
+                   spot: float | None = None,
+                   pip_size: int = 4) -> dict[str, Any] | None:
     """`api.proposal` kwargs for this signal, or None if it is not tradeable.
 
     Returning None rather than a zero-size order keeps "no trade" a first
@@ -144,6 +145,15 @@ def build_proposal(signal: Signal, instrument: str, symbol: str, stake: float,
     this, every barrier comparison across symbols with different price
     levels is meaningless, and every barrier on a high-priced symbol is
     effectively zero width regardless of what fraction was asked for.
+
+    `pip_size` is PER-SYMBOL, not a universal constant, and it caps how many
+    decimal places the barrier offset may have - confirmed live: Deriv
+    rejects R_10 at a 4th decimal place ("...more than 3 decimal places")
+    and 1HZ10V at a 3rd ("...more than 2 decimal places"), while R_50/R_75
+    accept 4. It comes from the same `ticks_history`/`candles` response that
+    supplies `spot`, so the caller already has it. Defaults to 4 only
+    because that is safe for the two symbols this repo has traded Touch on
+    so far - NOT because it is a general Deriv limit.
     """
     if instrument not in INSTRUMENTS:
         raise ValueError(f"unknown instrument '{instrument}' - choices: {list(INSTRUMENTS)}")
@@ -206,20 +216,16 @@ def build_proposal(signal: Signal, instrument: str, symbol: str, stake: float,
                          "TOUCH - a relative-fraction barrier cannot become "
                          "a Deriv offset without the current price to scale it by")
 
-    # 4 DECIMAL PLACES, NOT 5. Deriv rejects a relative barrier with a 5th
-    # decimal ("Barrier can only be up to 4 decimal places") - discovered
-    # live the first time this path was ever exercised end to end (no config
-    # had set instrument: touch before deriv_bot/touch_edge.py's scan and
-    # this bot). Every quoted barrier in that scan and in config.notouch.yaml
-    # is at least 0.0001 wide, so 4 places loses no precision that mattered.
+    if pip_size < 0:
+        raise ValueError("pip_size must be >= 0")
     if flat or no_view:
         offset = (signal.expected_move_pct or FLAT_MOVE_PCT) * spot
-        contract, barrier = "NOTOUCH", f"+{offset:.4f}"
+        contract, barrier = "NOTOUCH", f"+{offset:.{pip_size}f}"
     else:
         contract = "ONETOUCH"
         sign = "+" if signal.direction > 0 else "-"
         offset = signal.expected_move_pct * spot
-        barrier = f"{sign}{offset:.4f}"
+        barrier = f"{sign}{offset:.{pip_size}f}"
     return {
         **base,
         "contract_type": contract,

@@ -110,6 +110,11 @@ class Session:
         # every attempt of the first live session and never traded at all.
         self.multipliers: dict[str, tuple[int, ...]] = {}
         self.commissions: dict[str, float] = {}
+        # TOUCH barrier decimal precision is per-symbol, not universal -
+        # confirmed live: Deriv accepts 4 decimal places on R_50/R_75, 3 on
+        # R_10, 2 on 1HZ10V. Fetched once per symbol and cached, same pattern
+        # as `multipliers` above.
+        self.pip_sizes: dict[str, int] = {}
         self.opened = 0
         self.settled = 0
         self.realised = 0.0
@@ -180,6 +185,12 @@ class Session:
             self.multipliers[symbol] = tuple(rng or ())
         return self.multipliers[symbol]
 
+    async def _pip_size(self, symbol: str) -> int:
+        if symbol not in self.pip_sizes:
+            resp = await self.api.ticks_history(symbol, count=1)
+            self.pip_sizes[symbol] = int(resp["pip_size"])
+        return self.pip_sizes[symbol]
+
     async def _consider(self, symbol: str) -> None:
         if symbol in self.open:
             return
@@ -205,6 +216,7 @@ class Session:
             self._log(f"{symbol}: vol {vol:.1%} - no signal")
             return
 
+        pip_size = 4  # irrelevant for anything but TOUCH; overridden below
         if self.instrument == RISE_FALL:
             # No take-profit to size and no leverage to choose: the contract
             # pays on direction at a deadline the STRATEGY set, so overriding
@@ -222,6 +234,11 @@ class Session:
             # ever set instrument: touch until now).
             target = signal.expected_move_pct
             allowed = ()
+            try:
+                pip_size = await self._pip_size(symbol)
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"{symbol}: pip size unavailable ({type(exc).__name__})")
+                return
         else:
             # The chosen hold time decides the target, not the other way round.
             target = move_for_hold(self.hold_seconds, vol)
@@ -244,10 +261,11 @@ class Session:
             allowed_multipliers=allowed or None,
             commission=self.commissions.get(symbol, 0.0),
             duration=self.duration, duration_unit=self.duration_unit,
-            # Only meaningful for TOUCH (see build_proposal's docstring for
-            # why a relative-fraction barrier needs the current spot to
-            # become an absolute Deriv offset) - harmless to pass otherwise.
-            spot=float(candles[-1]["close"]),
+            # Both only meaningful for TOUCH (see build_proposal's docstring
+            # for why a relative-fraction barrier needs the current spot,
+            # scaled to the symbol's own decimal precision, to become a
+            # valid Deriv offset) - harmless to pass otherwise.
+            spot=float(candles[-1]["close"]), pip_size=pip_size,
         )
         if params is None:
             return
