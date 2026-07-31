@@ -24,3 +24,4 @@ bybit_cache/
 install_task_out.log
 consolidate_out.log
 .day_reset
+.env.bak*
