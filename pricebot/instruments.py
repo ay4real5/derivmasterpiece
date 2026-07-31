@@ -125,12 +125,25 @@ def build_proposal(signal: Signal, instrument: str, symbol: str, stake: float,
                    allowed_multipliers: tuple[int, ...] | None = None,
                    commission: float = 0.0,
                    duration: int | None = None,
-                   duration_unit: str | None = None) -> dict[str, Any] | None:
+                   duration_unit: str | None = None,
+                   spot: float | None = None) -> dict[str, Any] | None:
     """`api.proposal` kwargs for this signal, or None if it is not tradeable.
 
     Returning None rather than a zero-size order keeps "no trade" a first
     class outcome - the digit bot always traded something, which is how it
     paid the spread 80 times an hour.
+
+    `spot` is REQUIRED for TOUCH. Deriv's relative barrier syntax
+    (`"+0.3000"`) is an ABSOLUTE price offset from spot, not a fraction of
+    it, whatever the "relative" name suggests - confirmed live: an offset of
+    0.30 is a 0.27% barrier on R_50 (spot ~112) and a 0.00004% barrier on
+    1HZ25V (spot ~780,000), the same nominal number meaning wildly different
+    things depending on the symbol's price level. `Signal.expected_move_pct`
+    is documented as a genuine fraction of price, so it has to be multiplied
+    by the CURRENT spot before it can become a Deriv barrier string - without
+    this, every barrier comparison across symbols with different price
+    levels is meaningless, and every barrier on a high-priced symbol is
+    effectively zero width regardless of what fraction was asked for.
     """
     if instrument not in INSTRUMENTS:
         raise ValueError(f"unknown instrument '{instrument}' - choices: {list(INSTRUMENTS)}")
@@ -188,7 +201,11 @@ def build_proposal(signal: Signal, instrument: str, symbol: str, stake: float,
         }
 
     # TOUCH - the only instrument that can express "no move expected"
-    #
+    if spot is None or spot <= 0:
+        raise ValueError("build_proposal needs a positive `spot` price for "
+                         "TOUCH - a relative-fraction barrier cannot become "
+                         "a Deriv offset without the current price to scale it by")
+
     # 4 DECIMAL PLACES, NOT 5. Deriv rejects a relative barrier with a 5th
     # decimal ("Barrier can only be up to 4 decimal places") - discovered
     # live the first time this path was ever exercised end to end (no config
@@ -196,11 +213,13 @@ def build_proposal(signal: Signal, instrument: str, symbol: str, stake: float,
     # this bot). Every quoted barrier in that scan and in config.notouch.yaml
     # is at least 0.0001 wide, so 4 places loses no precision that mattered.
     if flat or no_view:
-        contract, barrier = "NOTOUCH", f"+{signal.expected_move_pct or FLAT_MOVE_PCT:.4f}"
+        offset = (signal.expected_move_pct or FLAT_MOVE_PCT) * spot
+        contract, barrier = "NOTOUCH", f"+{offset:.4f}"
     else:
         contract = "ONETOUCH"
         sign = "+" if signal.direction > 0 else "-"
-        barrier = f"{sign}{signal.expected_move_pct:.4f}"
+        offset = signal.expected_move_pct * spot
+        barrier = f"{sign}{offset:.4f}"
     return {
         **base,
         "contract_type": contract,

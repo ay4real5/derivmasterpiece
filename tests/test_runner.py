@@ -95,7 +95,12 @@ async def test_touch_keeps_the_strategys_own_barrier(tmp_path):
     await session._consider("R_50")
     journal.close()
     assert len(api.proposal_calls) == 1
-    assert api.proposal_calls[0]["barrier"] == "+0.3000"
+    # barrier_pct (0.30, a real fraction) scaled by the fake candles' last
+    # close - see build_proposal's spot-scaling fix. Computed from the same
+    # formula `candles()` above uses, not hardcoded, so this doesn't silently
+    # drift out of sync with that helper.
+    spot = candles()[-1]["close"]
+    assert api.proposal_calls[0]["barrier"] == f"+{0.30 * spot:.4f}"
     assert api.proposal_calls[0]["contract_type"] == "NOTOUCH"
     assert api.proposal_calls[0]["duration"] == 5
     assert api.proposal_calls[0]["duration_unit"] == "m"

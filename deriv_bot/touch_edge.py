@@ -34,8 +34,20 @@ from .api import DerivAPI
 # tightest barrier Deriv will quote on a 1-day Touch; these are the
 # minute/hour-scale equivalents and may not all be offered on every symbol —
 # a barrier Deriv refuses to quote is skipped, not treated as an error.
+#
+# THESE ARE GENUINE FRACTIONS OF SPOT, SCALED BEFORE USE. Deriv's relative
+# barrier string is an ABSOLUTE price offset, not a fraction, whatever
+# "relative" suggests - confirmed live, the same nominal offset was a 0.27%
+# barrier on a ~112-priced symbol and a 0.00004% barrier on a ~780,000-priced
+# one. `scan_touch` below fetches each symbol's spot and multiplies before
+# formatting, which is what makes these fractions actually comparable across
+# symbols with wildly different price levels - they were NOT scaled this way
+# before this fix, which is why every symbol other than the one whose price
+# level happened to make raw values sensible looked either unusably flat or
+# outright rejected.
 DEFAULT_BARRIER_PCTS: tuple[float, ...] = (
     0.001, 0.002, 0.003, 0.005, 0.01, 0.02, 0.03, 0.05, 0.10, 0.15, 0.20, 0.30,
+    0.40, 0.50, 0.60,
 )
 
 # (duration, duration_unit) pairs spanning the "5m-2h" range this repo's own
@@ -81,9 +93,27 @@ async def scan_touch(
     results: list[dict[str, Any]] = []
     try:
         for symbol in symbols:
+            # Fetched once per symbol, not per barrier/duration - spot moves
+            # a little over the course of one symbol's sweep, which is
+            # negligible next to the barrier widths being tested (0.1% and
+            # up), and refetching for every one of ~75 combinations would
+            # multiply the request count for no real gain in accuracy.
+            try:
+                tick_resp = await api.ticks_history(symbol, count=1)
+                spot = float(tick_resp["history"]["prices"][-1])
+            except Exception:
+                continue  # symbol not quotable right now - skip it entirely
+            if spot <= 0:
+                continue
+
             for duration, unit in durations:
                 for pct in barrier_pcts:
-                    barrier = f"+{pct:.5f}"
+                    # THE FIX: pct is a fraction of spot; Deriv's barrier
+                    # string wants an absolute offset, so it has to be
+                    # scaled by the current price before formatting - see
+                    # DEFAULT_BARRIER_PCTS' docstring for why this matters.
+                    offset = pct * spot
+                    barrier = f"+{offset:.4f}"
                     base = dict(
                         underlying_symbol=symbol, amount=stake, basis="stake",
                         duration=duration, duration_unit=unit, currency=currency,
@@ -107,6 +137,7 @@ async def scan_touch(
                         "duration": duration,
                         "duration_unit": unit,
                         "barrier_pct": pct,
+                        "spot": spot,
                         "touch_payout": touch_payout,
                         "no_touch_payout": no_touch_payout,
                         "margin_pct": margin * 100,

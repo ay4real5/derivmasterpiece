@@ -244,6 +244,10 @@ class Session:
             allowed_multipliers=allowed or None,
             commission=self.commissions.get(symbol, 0.0),
             duration=self.duration, duration_unit=self.duration_unit,
+            # Only meaningful for TOUCH (see build_proposal's docstring for
+            # why a relative-fraction barrier needs the current spot to
+            # become an absolute Deriv offset) - harmless to pass otherwise.
+            spot=float(candles[-1]["close"]),
         )
         if params is None:
             return

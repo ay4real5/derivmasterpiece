@@ -80,16 +80,42 @@ def test_rise_fall_duration_never_rounds_to_zero():
 # --- touch / no touch ---------------------------------------------------
 
 def test_touch_expects_a_move_in_the_signalled_direction():
-    assert build_proposal(up(), TOUCH, "R_10", 3.0)["barrier"].startswith("+")
-    assert build_proposal(down(), TOUCH, "R_10", 3.0)["barrier"].startswith("-")
-    assert build_proposal(up(), TOUCH, "R_10", 3.0)["contract_type"] == "ONETOUCH"
+    assert build_proposal(up(), TOUCH, "R_10", 3.0, spot=100.0)["barrier"].startswith("+")
+    assert build_proposal(down(), TOUCH, "R_10", 3.0, spot=100.0)["barrier"].startswith("-")
+    assert build_proposal(up(), TOUCH, "R_10", 3.0, spot=100.0)["contract_type"] == "ONETOUCH"
+
+
+def test_touch_requires_a_spot_price():
+    """Deriv's relative barrier is an ABSOLUTE offset from spot, not a
+    fraction of it - confirmed live: the same nominal offset means a 0.27%
+    barrier on a ~112-priced symbol and a 0.00004% barrier on a
+    ~780,000-priced one. A fraction can't become that offset without the
+    current price to scale it by."""
+    with pytest.raises(ValueError):
+        build_proposal(up(), TOUCH, "R_10", 3.0)
+
+
+def test_touch_barrier_scales_the_fraction_by_spot():
+    """expected_move_pct=0.002 (0.2%) on a spot of 100 must produce a 0.20
+    absolute offset, not the raw 0.002 - the bug this fix corrects."""
+    p = build_proposal(up(move=0.002), TOUCH, "R_10", 3.0, spot=100.0)
+    assert p["barrier"] == "+0.2000"
+
+
+def test_touch_barrier_is_symbol_price_aware():
+    """The same fraction must produce a different absolute barrier on a
+    different-priced symbol - this is the whole point of the fix."""
+    cheap = build_proposal(up(move=0.01), TOUCH, "R_10", 3.0, spot=100.0)
+    expensive = build_proposal(up(move=0.01), TOUCH, "R_75", 3.0, spot=50000.0)
+    assert cheap["barrier"] == "+1.0000"
+    assert expensive["barrier"] == "+500.0000"
 
 
 def test_no_touch_expresses_a_forecast_of_no_move():
     """The only one of the three that can hold a position on 'nothing
     happens' rather than expressing it as inaction."""
     flat = Signal(0, FLAT_MOVE_PCT / 2, 900, 0.8, "quiet")
-    p = build_proposal(flat, TOUCH, "R_10", 3.0)
+    p = build_proposal(flat, TOUCH, "R_10", 3.0, spot=100.0)
     assert p is not None
     assert p["contract_type"] == "NOTOUCH"
 
@@ -99,18 +125,18 @@ def test_no_touch_also_expresses_a_no_view_wide_barrier():
     deliberately WIDE move is 'no forecast, buy this win-rate shape' (see
     deriv_bot/touch_edge.py) - not a claim the price will stay put."""
     wide = Signal(0, 0.30, 300, 1.0, "fixed cheap barrier")
-    p = build_proposal(wide, TOUCH, "R_50", 3.0)
+    p = build_proposal(wide, TOUCH, "R_50", 3.0, spot=100.0)
     assert p is not None
     assert p["contract_type"] == "NOTOUCH"
-    assert p["barrier"] == "+0.3000"
+    assert p["barrier"] == "+30.0000"
     assert len(p["barrier"].split(".")[1]) <= 4, "Deriv rejects a 5th decimal place"
 
 
 def test_directional_signals_are_unaffected_by_the_no_view_case():
     """direction != 0 still always means ONETOUCH, regardless of move size -
     the new no_view branch must not swallow directional signals."""
-    assert build_proposal(up(move=0.30), TOUCH, "R_50", 3.0)["contract_type"] == "ONETOUCH"
-    assert build_proposal(down(move=0.30), TOUCH, "R_50", 3.0)["contract_type"] == "ONETOUCH"
+    assert build_proposal(up(move=0.30), TOUCH, "R_50", 3.0, spot=100.0)["contract_type"] == "ONETOUCH"
+    assert build_proposal(down(move=0.30), TOUCH, "R_50", 3.0, spot=100.0)["contract_type"] == "ONETOUCH"
 
 
 # --- no trade is a first-class outcome ----------------------------------
