@@ -112,6 +112,20 @@ async def test_touch_actually_opens_a_position(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_touch_session_start_reports_its_real_expiry(tmp_path, capsys):
+    """Before this, TOUCH fell into the MULTIPLIER-shaped 'hold~Xm' log
+    line, which reports hold_seconds - a setting TOUCH doesn't even use.
+    tools/check_deploy.py parses this exact line for its `expiry` check and
+    read every TOUCH deployment as 'strategy-derived' regardless of the
+    config, because it never said "expiry ..." at all."""
+    session, _api, journal = make_session(tmp_path)
+    await session.run(0.01)
+    journal.close()
+    out = capsys.readouterr().out
+    assert "expiry 5m" in out
+
+
+@pytest.mark.asyncio
 async def test_touch_skips_a_symbol_with_an_open_position(tmp_path):
     session, api, journal = make_session(tmp_path)
     session.open["R_50"] = 999

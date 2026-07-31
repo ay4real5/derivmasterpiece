@@ -299,7 +299,14 @@ class Session:
 
     async def run(self, seconds: float) -> None:
         deadline = time.monotonic() + seconds
-        if self.instrument == RISE_FALL:
+        # RISE_FALL and TOUCH are both all-or-nothing at a deadline the
+        # config can set explicitly (`self.duration`) - unlike MULTIPLIER,
+        # which has no expiry at all and is genuinely governed by
+        # `hold_seconds`. Reporting TOUCH's duration the same way RISE_FALL's
+        # already is lets tools/check_deploy.py's `expiry` check (which
+        # parses this exact log line) verify it - without this it always
+        # read "strategy-derived" regardless of what was actually trading.
+        if self.instrument in (RISE_FALL, TOUCH):
             hold = (f"expiry {self.duration}{self.duration_unit}"
                     if self.duration else "expiry set by strategy")
             hold += f" staking={self.staking_cfg.get('name', 'flat')}"
