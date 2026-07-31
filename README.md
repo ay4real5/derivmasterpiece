@@ -73,7 +73,12 @@ Worth knowing: the supervisor relaunches its child every 30 minutes, so **child*
 settings (expiry, staking) land on their own eventually, but **supervisor**
 settings (the caps) need a real restart.
 
-### The two reports, and what they concluded
+**[OPERATING_STATE.md](OPERATING_STATE.md) — what is running right now and why.**
+Start there. `config.yaml` is gitignored, so that file is the only durable
+record of the live settings, the measured contract costs behind them, the
+running results, and the open items.
+
+### The reports, and what they concluded
 
 - **[TICK_ANALYSIS.md](TICK_ANALYSIS.md)** — 260 statistical tests on 864,000
   ticks across ten synthetic indices. Zero survive correction. The synthetic
