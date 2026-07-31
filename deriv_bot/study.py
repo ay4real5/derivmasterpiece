@@ -87,11 +87,67 @@ def score_leg(digits: list[int], kind: str, barrier: str | None) -> dict[str, An
     }
 
 
-def score_legs(digits: list[int], legs: Iterable[tuple[str, str | None]]) -> list[dict[str, Any]]:
-    """`score_leg` across many legs, skipping the ones that cannot be scored."""
+def score_price_leg(prices: list[float], kind: str) -> dict[str, Any] | None:
+    """Observed vs theoretical hit rate for CALL/PUT, judged from PRICES.
+
+    `score_leg` returns None for these because a digit stream says nothing
+    about direction - correct, but it left the rise side of the book with NO
+    analysis at all. The rotation simply handed CALL a turn, so "even or rise"
+    was decided by whose turn it was rather than by anything measured.
+
+    The two are directly comparable here because BOTH contracts settle on the
+    very next tick:
+
+        DIGITEVEN   is the next digit even?     expected 0.5
+        CALL        is the next tick higher?    expected 0.5
+
+    So the same binomial estimator applies, over the same history, against the
+    same theoretical rate - and the row shape matches `score_leg` exactly, so
+    `choose`, `observed_ev` and `summarise` all work on it unchanged.
+
+    Flat ticks are excluded rather than counted as losses. A tie loses both
+    CALL and PUT, so it belongs to neither side's hit rate; counting it would
+    drag both observed rates below 0.5 and manufacture a reversion signal out
+    of an unchanged price.
+    """
+    if kind not in PRICE_RESOLVED:
+        return None
+    moves = [1 if b > a else (-1 if b < a else 0)
+             for a, b in zip(prices, prices[1:])]
+    decisive = [m for m in moves if m != 0]
+    n = len(decisive)
+    if n < 2:
+        return None
+    wanted = 1 if kind == "CALL" else -1
+    hits = sum(1 for m in decisive if m == wanted)
+    observed = hits / n
+    expected = 0.5
+    denom = math.sqrt(expected * (1.0 - expected) / n)
+    z = (observed - expected) / denom if denom else 0.0
+    return {
+        "contract_type": kind,
+        "barrier": None,
+        "n": n,
+        "hits": hits,
+        "observed": observed,
+        "expected": expected,
+        "z": z,
+    }
+
+
+def score_legs(digits: list[int], legs: Iterable[tuple[str, str | None]],
+               prices: list[float] | None = None) -> list[dict[str, Any]]:
+    """`score_leg` across many legs, skipping the ones that cannot be scored.
+
+    `prices` enables the CALL/PUT legs. Without it those are skipped exactly
+    as before, so every existing caller keeps its current behaviour.
+    """
     scored = []
     for kind, barrier in legs:
-        row = score_leg(digits, kind, barrier)
+        if kind in PRICE_RESOLVED:
+            row = score_price_leg(prices, kind) if prices else None
+        else:
+            row = score_leg(digits, kind, barrier)
         if row is not None:
             scored.append(row)
     return scored

@@ -141,7 +141,9 @@ async def _study_pick(
         prices, pip_size = payload
 
         digits = digits_from_ticks(prices, pip_size)
-        scored = score_legs(digits, target_legs)
+        # `prices` enables the CALL/PUT legs. Without it the rise side is
+        # silently unscoreable and the study can only ever pick a digit.
+        scored = score_legs(digits, target_legs, prices=prices)
         quotes = {(r["contract_type"], r["barrier"]): r
                   for r in results if r["symbol"] == sym}
         print(f"study[{sym}] {summarise(scored)}")
@@ -827,7 +829,7 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool,
     symbol_rr = RoundRobin(symbols)
     study_cfg = dict(st_cfg.get("study", {}))
     selection_mode = str((st_cfg.get("selection") or {}).get("mode", "global_best")).lower()
-    if selection_mode not in ("global_best", "rotation"):
+    if selection_mode not in ("global_best", "rotation", "signal"):
         sys.exit(f"scan_trade.selection.mode must be 'global_best' or 'rotation', "
                  f"got {selection_mode!r}")
 
@@ -939,6 +941,41 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool,
                         f"{best['contract_type']}{barrier_desc} "
                         f"(edge {best['edge_pct']:.2f}%, win prob {best['win_prob']:.0%})"
                     )
+                elif selection_mode == "signal":
+                    # DECIDE each cycle instead of taking turns. The symbol
+                    # still rotates - there is no signal telling us which
+                    # market to look at - but WHICH contract to buy on it is
+                    # left entirely to the study below, which now scores the
+                    # rise side as well as the digit side.
+                    #
+                    # The pick made here is only the fallback: whichever
+                    # configured leg quotes cheapest on this symbol. It stands
+                    # if, and only if, the study abstains. That fallback is not
+                    # arbitrary - the margin gap between DIGITEVEN (2.39%) and
+                    # CALL (3.99%) is the one measured, repeatable edge
+                    # available, so "no signal" should mean "pay the least".
+                    symbol = symbol_rr.next()
+                    legs = list(candidates)
+                    cell = [r for r in results if r["symbol"] == symbol
+                            and (r["contract_type"], r["barrier"]) in legs]
+                    if not cell:
+                        print(f"nothing quoted on {symbol} this cycle - skipping")
+                        elapsed = time.monotonic() - cycle_start
+                        if elapsed < interval:
+                            await asyncio.sleep(interval - elapsed)
+                        continue
+                    best = min(cell, key=lambda r: r["edge_pct"])
+                    category = next((c for c, cl in CATEGORY_LEGS.items()
+                                     if (best["contract_type"], best["barrier"]) in cl),
+                                    "unknown")
+                    selector = "signal-fallback"
+                    barrier_desc = "" if best["barrier"] is None else f":{best['barrier']}"
+                    print(
+                        f"signal mode on {symbol}: fallback is "
+                        f"{best['contract_type']}{barrier_desc} "
+                        f"(cheapest of {len(cell)} legs, edge {best['edge_pct']:.2f}%) "
+                        f"- the study decides whether to override it"
+                    )
                 else:
                     category = category_rr.next()
                     symbol = symbol_rr.next()
@@ -971,20 +1008,26 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool,
                     # measured 10.89% WORSE than abstaining, stake-matched.
                     # Letting the study override here would hand back the
                     # entire reason for choosing globally.
+                    # In `signal` mode the study decides even-vs-rise itself, so
+                    # it has to see BOTH legs every cycle. Under `rotation` it
+                    # only ever saw the leg whose turn it was, which is why the
+                    # mix alternated regardless of what the numbers said.
                     study_legs = legs if selection_mode == "rotation" else list(candidates)
                     studied, study_selector = await _study_pick(
                         api, study_cfg, results, symbol, study_legs,
                         after_loss=last_trade_lost,
                         symbols=symbols, candidates=candidates,
                     )
-                    if selection_mode == "rotation":
+                    if selection_mode in ("rotation", "signal"):
                         selector = study_selector
                         if studied is not None:
                             best = studied
                             barrier_desc = ("" if best["barrier"] is None
                                             else f":{best['barrier']}")
+                            what = ("the rotation" if selection_mode == "rotation"
+                                    else "the cheapest-margin fallback")
                             print(
-                                f"study overrode the rotation -> {best['symbol']} "
+                                f"study overrode {what} -> {best['symbol']} "
                                 f"{best['contract_type']}{barrier_desc} "
                                 f"(edge {best['edge_pct']:.2f}%)"
                             )

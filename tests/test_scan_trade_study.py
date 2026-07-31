@@ -110,11 +110,49 @@ def test_history_failure_does_not_stop_trading():
     assert selector == "study-abstain"
 
 
-def test_rise_fall_legs_are_never_study_picked():
-    # CALL/PUT resolve on price; digits say nothing about them
+def test_digits_alone_still_say_nothing_about_rise_fall():
+    """The original invariant, kept: a DIGIT stream cannot judge CALL/PUT.
+
+    This test used to assert those legs were never study-picked AT ALL, which
+    was true only because nothing scored them. That left the rise side of the
+    book with no analysis whatsoever - the rotation just handed it a turn.
+    They are now scored from PRICES, on the same next-tick binomial as the
+    digit legs. What remains true, and is asserted here, is that the digit
+    scorer itself still refuses them.
+    """
+    from deriv_bot.study import score_leg, score_legs
+    digits = [d % 10 for d in range(200)]
+    assert score_leg(digits, "CALL", None) is None
+    assert score_leg(digits, "PUT", None) is None
+    # and with no prices supplied, they stay unscoreable
+    assert score_legs(digits, CATEGORY_LEGS["rise_fall"]) == []
+
+
+def test_rise_fall_legs_are_scoreable_once_prices_are_available():
+    """_all_even's price series is a sawtooth - 100.00, .02, .04, .06, .08,
+    back to 100.00 - so four moves in five are up. An 80% up-rate over 200
+    ticks is a real directional pattern, and the price scorer should find it.
+    """
     api = _FakeAPI({"R_10": _all_even(200), "R_25": _uniform(200)})
     legs = CATEGORY_LEGS["rise_fall"]
     pick, selector = _run(api, {"enabled": True, "window": 200},
+                          _quotes("R_10", legs), "R_10", legs, False)
+    assert pick is not None, "the rise side should now be judgeable"
+    assert pick["contract_type"] == "CALL"
+    assert selector == "study"
+
+
+def test_a_directionless_price_series_still_abstains():
+    """The control. A fair walk must NOT produce a rise signal, or the scorer
+    would be manufacturing one."""
+    import random
+    rng = random.Random(7)
+    p = [100.0]
+    for _ in range(400):
+        p.append(p[-1] + rng.choice([0.01, -0.01]))
+    api = _FakeAPI({"R_10": p, "R_25": _uniform(400)})
+    legs = CATEGORY_LEGS["rise_fall"]
+    pick, selector = _run(api, {"enabled": True, "window": 400},
                           _quotes("R_10", legs), "R_10", legs, False)
     assert pick is None
     assert selector == "study-abstain"
