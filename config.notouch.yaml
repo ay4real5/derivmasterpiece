@@ -53,12 +53,14 @@ pricebot:
 
   strategy:
     name: fixed_notouch
-    # 30% barrier over a 5-minute window on R_50: measured at 93.5% NOTOUCH
-    # win-rate, 2.28% margin (`scan-touch` output, symbol R_50, dur 5m,
-    # barrier 30.000%). This is a payout SHAPE, not a forecast - margin was
-    # ~2.3-2.55% across every barrier/duration tried on R_50, so this barrier
-    # was chosen for the win-rate shape, not because it is cheaper than the
-    # alternatives. Re-run scan-touch before trusting this number long after
-    # the fact; margins drift, same caveat as scan-edge.
-    barrier_pct: 0.30
+    # CORRECTED 2026-07-31: barrier_pct is a genuine fraction of spot as of
+    # this fix (see pricebot/instruments.py's build_proposal - Deriv's
+    # relative barrier is an ABSOLUTE offset, not a fraction, so it must be
+    # scaled by spot before use, which it was NOT before this fix). The
+    # value below (0.27%) reproduces the ~0.30-absolute-offset barrier this
+    # bot actually traded on R_50 (spot ~112) before the fix - i.e. the SAME
+    # real-world barrier as before, not a new one. It is a placeholder while
+    # a fresh scan-touch sweep (now correctly spot-scaled) picks a
+    # deliberate shape rather than one inherited from the bug.
+    barrier_pct: 0.0027
     horizon_seconds: 300
