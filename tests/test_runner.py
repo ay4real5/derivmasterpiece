@@ -15,10 +15,12 @@ bugs that a fake-API test now locks in the fix for:
    (`params['multiplier']`) for anything that wasn't RISE_FALL, which would
    raise a KeyError logging a TOUCH trade.
 """
+import asyncio
+
 import pytest
 
 from deriv_bot.journal import TradeJournal
-from pricebot.runner import Session
+from pricebot.runner import STRAGGLER_GRACE_SECONDS, Session
 
 
 def candles(n=30, price=100.0):
@@ -27,12 +29,13 @@ def candles(n=30, price=100.0):
 
 
 class FakeAPI:
-    """Just enough of DerivAPI for `_consider` to run end to end."""
+    """Just enough of DerivAPI for `_consider` and `_watch` to run end to end."""
 
-    def __init__(self):
+    def __init__(self, settle_delay: float = 0.0):
         self.proposal_calls: list[dict] = []
         self.bought: dict | None = None
         self.contracts_for_calls = 0
+        self.settle_delay = settle_delay
 
     async def candles(self, symbol, granularity=60, count=500):
         return candles()
@@ -53,8 +56,13 @@ class FakeAPI:
         self.bought = {"id": proposal_id, "price": price}
         return {"buy": {"contract_id": 42}}
 
+    async def wait_for_settlement(self, contract_id, timeout=86400):
+        await asyncio.sleep(self.settle_delay)
+        return {"profit": 0.2, "contract_type": "NOTOUCH",
+                "buy_price": 3.0, "payout": 3.2, "status": "won"}
 
-def make_session(tmp_path, **pricebot_overrides):
+
+def make_session(tmp_path, api=None, **pricebot_overrides):
     config = {
         "pricebot": {
             "instrument": "touch",
@@ -69,7 +77,7 @@ def make_session(tmp_path, **pricebot_overrides):
         }
     }
     journal = TradeJournal(str(tmp_path / "journal.csv"))
-    api = FakeAPI()
+    api = api if api is not None else FakeAPI()
     return Session(api, config, journal), api, journal
 
 
@@ -110,3 +118,45 @@ async def test_touch_skips_a_symbol_with_an_open_position(tmp_path):
     await session._consider("R_50")
     journal.close()
     assert api.proposal_calls == []
+
+
+# --- run() waits for stragglers before exiting -----------------------------
+#
+# The bug this guards: `_watch` runs as a background task, and `run()` used
+# to return the moment its polling loop's deadline passed, with no regard
+# for a position opened near the end of the window. The contract still
+# settled fine on Deriv's side, but `main()` closes the API connection right
+# after `run()` returns, cutting the watcher's subscription off mid-flight -
+# so the trade never reached the journal, and the daily-loss cap that reads
+# it never found out. Measured live: 4 of 5 real trades were lost this way.
+
+@pytest.mark.asyncio
+async def test_run_waits_for_a_position_opened_near_the_end_of_the_window(tmp_path, monkeypatch):
+    import pricebot.runner as runner_module
+    monkeypatch.setattr(runner_module, "STRAGGLER_GRACE_SECONDS", 2.0)
+
+    api = FakeAPI(settle_delay=0.3)
+    session, _api, journal = make_session(tmp_path, api=api, poll_seconds=0.05)
+    # A session window barely longer than one poll cycle - the position
+    # opens with almost no time left before `run()`'s deadline.
+    await session.run(0.1)
+    journal.close()
+
+    assert session.settled == 1
+    rows = list(open(str(journal.path)).read().splitlines())
+    assert len(rows) == 2  # header + the settled trade
+
+
+@pytest.mark.asyncio
+async def test_run_gives_up_after_the_grace_period_not_forever(tmp_path, monkeypatch):
+    import pricebot.runner as runner_module
+    monkeypatch.setattr(runner_module, "STRAGGLER_GRACE_SECONDS", 0.1)
+
+    api = FakeAPI(settle_delay=10.0)  # far longer than the grace period
+    session, _api, journal = make_session(tmp_path, api=api, poll_seconds=0.05)
+    await session.run(0.1)
+    journal.close()
+
+    # run() must return promptly rather than hang on a slow settlement -
+    # profit_table reconciliation (see pricebot/reconcile.py) is the backstop.
+    assert session.settled == 0

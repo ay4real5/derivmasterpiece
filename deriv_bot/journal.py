@@ -12,6 +12,7 @@ class TradeJournal:
     FIELDS = [
         "timestamp", "symbol", "contract_type", "barrier",
         "stake", "payout", "profit", "balance_after", "reason", "selector",
+        "contract_id",
     ]
 
     def __init__(self, path: str = "trade_journal.csv"):

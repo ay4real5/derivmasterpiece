@@ -39,6 +39,11 @@ from .instruments import INSTRUMENTS, RISE_FALL, TOUCH, build_proposal, stake_fo
 from .signals import build_strategy
 from .symbol_cost import move_for_hold, realised_vol
 
+# How long `run()` waits for in-flight positions to settle before returning.
+# Generous relative to this bot's shortest contracts (a few minutes) but
+# bounded so a stuck watcher cannot hang the supervisor's restart cycle.
+STRAGGLER_GRACE_SECONDS = 90.0
+
 
 async def measure_symbol(api: DerivAPI, symbol: str, granularity: int,
                          count: int = 500) -> tuple[list[dict[str, Any]], float]:
@@ -91,6 +96,14 @@ class Session:
         # contract_id per symbol; a symbol with a live position is skipped so
         # the bot cannot stack positions on one market.
         self.open: dict[str, int] = {}
+        # Watcher tasks in flight, so `run()` can wait for them at session end
+        # instead of exiting mid-settlement. Without this, a position opened
+        # near the end of a session window settles fine on Deriv's side but
+        # never reaches the journal - and the journal is the ONLY thing the
+        # supervisor's daily-loss cap reads (see `tools/risefall_supervisor.py`
+        # day_pnl). A session that routinely drops its last trade hands the
+        # next session a budget that does not know about that loss.
+        self._watch_tasks: set[asyncio.Task] = set()
         # Deriv's multiplier ranges are per-symbol and not similar - R_10 takes
         # [400,1000,...], R_25 [160,400,...], gold [100,200,...]. Fetched once
         # per symbol and cached; a hardcoded list meant gold was rejected on
@@ -151,7 +164,7 @@ class Session:
                 barrier="", stake=contract.get("buy_price", ""),
                 payout=contract.get("payout", ""), profit=profit,
                 balance_after="", reason=contract.get("status", ""),
-                selector="pricebot",
+                selector="pricebot", contract_id=contract_id,
             )
         except Exception as exc:  # noqa: BLE001 - a lost watcher must not kill the session
             self._log(f"watch failed for {symbol} {contract_id}: "
@@ -280,7 +293,9 @@ class Session:
                 f"TP {lo.get('take_profit', {}).get('order_amount')} "
                 f"SL {lo.get('stop_loss', {}).get('order_amount')} | {signal.reason}"
             )
-        asyncio.create_task(self._watch(symbol, cid))
+        task = asyncio.create_task(self._watch(symbol, cid))
+        self._watch_tasks.add(task)
+        task.add_done_callback(self._watch_tasks.discard)
 
     async def run(self, seconds: float) -> None:
         deadline = time.monotonic() + seconds
@@ -296,6 +311,27 @@ class Session:
         while time.monotonic() < deadline:
             await asyncio.gather(*(self._consider(s) for s in self.symbols))
             await asyncio.sleep(self.poll_seconds)
+
+        # Give any positions still settling a real chance to reach the
+        # journal before the process exits. `main()` closes the API
+        # connection right after `run()` returns, which would otherwise cut
+        # off `_watch`'s subscription mid-flight - the position still
+        # settles fine on Deriv's side, but the journal (and the daily-loss
+        # cap that reads it) never finds out. Bounded, not unbounded: a
+        # genuinely stuck watcher must not hang the supervisor's restart
+        # cycle forever - `main()`'s startup reconciliation against Deriv's
+        # own profit_table is the backstop for whatever still slips past this.
+        if self._watch_tasks:
+            pending = list(self._watch_tasks)
+            self._log(f"waiting up to {STRAGGLER_GRACE_SECONDS:.0f}s for "
+                      f"{len(pending)} position(s) still settling")
+            _done, still_pending = await asyncio.wait(
+                pending, timeout=STRAGGLER_GRACE_SECONDS)
+            if still_pending:
+                self._log(f"{len(still_pending)} position(s) did not settle "
+                          f"in time - relying on profit_table reconciliation "
+                          f"on the next start")
+
         self._log(f"session window over: opened {self.opened}, closed {self.settled}, "
                   f"realised {self.realised:+.2f}, still open {list(self.open)}")
         # Positions left open are safe: their exits are held by Deriv, not here.

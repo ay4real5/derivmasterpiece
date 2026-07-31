@@ -40,6 +40,15 @@ RISE_FALL = "rise_fall"
 TOUCH = "touch"
 INSTRUMENTS = (MULTIPLIER, RISE_FALL, TOUCH)
 
+# Which `contract_type` values each instrument actually places - used by
+# `pricebot/reconcile.py` to scope profit_table reconciliation to one bot's
+# own trades on an account that may run more than one bot at once.
+CONTRACT_TYPES_FOR_INSTRUMENT: dict[str, set[str]] = {
+    MULTIPLIER: {"MULTUP", "MULTDOWN"},
+    RISE_FALL: {"CALL", "PUT"},
+    TOUCH: {"ONETOUCH", "NOTOUCH"},
+}
+
 # Deriv rejects anything else; discovered from the API's own error message
 # rather than the docs.
 VALID_MULTIPLIERS = (400, 1000, 2000, 3000, 4000)

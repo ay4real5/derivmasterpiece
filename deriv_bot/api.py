@@ -292,6 +292,22 @@ class DerivAPI:
         # legacy docs. Verified against the live endpoint.
         return await self.send({"contracts_for": symbol})
 
+    async def profit_table(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        """Deriv's own settled-contract history for this account, newest
+        first - the authoritative record a local journal can be reconciled
+        against.
+
+        Verified live: each transaction carries `contract_id`, `contract_type`,
+        `underlying_symbol`, `buy_price`, `sell_price`, `payout`,
+        `purchase_time` and `sell_time` - everything a journal row needs, with
+        no shortcode parsing required.
+        """
+        resp = await self.send({
+            "profit_table": 1, "description": 1, "sort": "DESC",
+            "limit": limit, "offset": offset,
+        })
+        return resp["profit_table"]["transactions"]
+
     async def proposal(self, **params: Any) -> dict[str, Any]:
         return await self.send({"proposal": 1, **params})
 
