@@ -828,6 +828,13 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool,
     category_rr = RoundRobin(categories)
     symbol_rr = RoundRobin(symbols)
     study_cfg = dict(st_cfg.get("study", {}))
+    # "cheapest" keeps the old behaviour: abstain, then buy the cheapest leg
+    # anyway. "wait" skips the cycle. Default stays "cheapest" so no existing
+    # config changes behaviour by upgrading.
+    abstain_action = str(study_cfg.pop("abstain_action", "cheapest")).lower()
+    if abstain_action not in ("cheapest", "wait"):
+        sys.exit(f"scan_trade.study.abstain_action must be 'cheapest' or "
+                 f"'wait', got {abstain_action!r}")
     selection_mode = str((st_cfg.get("selection") or {}).get("mode", "global_best")).lower()
     if selection_mode not in ("global_best", "rotation", "signal"):
         sys.exit(f"scan_trade.selection.mode must be 'global_best' or 'rotation', "
@@ -1020,6 +1027,31 @@ async def _run_scan_trade(config: dict[str, Any], dry_run: bool,
                     )
                     if selection_mode in ("rotation", "signal"):
                         selector = study_selector
+                        # WAIT rather than trade whatever is cheapest.
+                        #
+                        # Abstaining used to still buy something - the gate
+                        # decided WHICH contract, never WHETHER to trade - so
+                        # the bot paid the margin every 45 seconds no matter
+                        # what it had just measured. That is not patience, it
+                        # is a rebranded coin flip.
+                        #
+                        # `abstain_action: wait` skips the cycle entirely.
+                        # Measured effect at min_z=2.0 over two legs: a cycle
+                        # fires 4.5% of the time, so ~3.6 trades an hour
+                        # instead of 80 - about 22x fewer, and 22x less bleed.
+                        #
+                        # Be clear about what it does NOT do: a z>=2 reading on
+                        # a structureless feed is a false positive by
+                        # construction, roughly 1 draw in 22. Those trades are
+                        # no likelier to win. The entire gain is in not paying
+                        # 2.33% eighty times an hour.
+                        if studied is None and abstain_action == "wait":
+                            print(f"waiting - nothing cleared z>={study_cfg.get('min_z', 2.0)} "
+                                  f"this cycle, so no trade is placed")
+                            elapsed = time.monotonic() - cycle_start
+                            if elapsed < interval:
+                                await asyncio.sleep(interval - elapsed)
+                            continue
                         if studied is not None:
                             best = studied
                             barrier_desc = ("" if best["barrier"] is None
