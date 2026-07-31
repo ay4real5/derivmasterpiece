@@ -10,7 +10,27 @@
 # has no RiskManager of its own (that is digit-bot-only). It is enforced by
 # tools/risefall_supervisor.py's own --max-daily-loss/--target-profit flags,
 # which read the journal directly - see tools/install_risefall_task.ps1
-# -ConfigPath config.notouch.yaml -MaxDailyLoss 1000 -TargetProfit 1200.
+# -ConfigPath config.notouch.yaml -MaxDailyLoss 2000 -TargetProfit 2000.
+#
+# === HIGH-VARIANCE MODE (2026-07-31) ===
+# This config was switched from a high-win-rate/low-payout shape (93-96% win,
+# $0.11-$0.27 per win) to a LOW-win-rate/HIGH-payout shape (30-53% win,
+# $8.60-$22.12 per win on $10 stake) at the user's explicit request, to give
+# a real chance at +$300-500/day outcomes through VARIANCE, not through edge.
+#
+# This is NOT a profitable strategy. The expected daily loss is ~$346 (the
+# same ~2.3% margin as every other config, just at higher stake). What
+# changed is the SHAPE: instead of a slow steady bleed with almost no chance
+# of a big winning day, this config has high daily variance — roughly:
+#   P(+$300 day): ~7.7%  (1 in 13 days)
+#   P(+$500 day): ~3.1%  (1 in 33 days)
+#   P(-$500 day): ~36.6%
+#   expected account lifetime at $9000: ~26 days
+#
+# The user understands this is a negative-edge game and chose to trade
+# variance for a shot at big days, on a DEMO account. No recovery/martingale
+# scheme is used — flat staking only, because recovery is provably worse
+# (see tools/martingale_sim.py and the simulation results in the plan file).
 app_id: 33ULSRYkmDK8Y515CmE1l
 currency: USD
 journal_path: notouch_journal.csv
@@ -18,72 +38,41 @@ journal_path: notouch_journal.csv
 pricebot:
   instrument: touch
 
-  # FIVE symbols, chosen 2026-07-31 from a full 10-symbol scan-touch sweep
-  # (`python main.py scan-touch --symbol <each of R_10/25/50/75/100 and
-  # 1HZ10V/25V/50V/75V/100V>`), AFTER fixing two real bugs the first sweep
-  # had (see git log: barriers were never scaled by spot, and decimal
-  # precision was hardcoded to 4 instead of each symbol's own pip_size).
-  # With both fixed, all ten symbols behave sensibly - the earlier "R_75 is
-  # barrier-insensitive" finding was entirely an artifact of those two bugs,
-  # not a real anomaly.
-  #
-  # These five all reach a comparable ~93-96% NOTOUCH win rate at the SAME
-  # 5-minute duration this bot already uses (barrier_pct/barrier_by_symbol
-  # below), at the same ~2.3-2.5% margin measured everywhere else in this
-  # project - still a payout SHAPE, not an edge. R_10, R_25, 1HZ10V, 1HZ25V
-  # could reach a similar shape too, but only at longer durations (15m+),
-  # not at this bot's 5-minute cadence - left out rather than mixing
-  # durations across symbols, which the current strategy/config schema
-  # doesn't support cleanly yet.
+  # Same 5 symbols as the safe config, but at 0.10% barrier instead of
+  # 0.30-0.50%. At 0.10% the win rate drops to 30-53% (varies by symbol
+  # volatility) but the payout per win jumps to $18-32 on a $10 stake.
+  # This is what creates the daily variance — big wins, big losses, same
+  # negative edge.
   symbols: [R_50, R_75, R_100, 1HZ50V, 1HZ75V]
 
-  stake: 3.00
-  max_stake: 3.00
+  stake: 10.00
+  max_stake: 10.00
 
-  # Explicit, not derived from horizon_seconds - Touch, like Rise/Fall, is
-  # all-or-nothing at a deadline, so the duration IS the trade. Same 5m for
-  # every symbol above - only the barrier differs per symbol (see strategy
-  # block), since each symbol needs a different width to reach a comparable
-  # win rate at this SAME duration.
+  # Same 5-minute duration as before.
   duration: 5
   duration_unit: m
 
-  # Flat, not a ladder, and per-symbol (Session._staker keys by symbol) - a
-  # NOTOUCH loss is already the full stake (there is no partial-loss rung to
-  # recover from the way a ladder assumes), and the margin math says every
-  # barrier costs the same, so escalating stake after a loss would only
-  # replay the recovery-ladder tail-risk this project has already measured
-  # elsewhere (see OPERATING_STATE.md's 9-rung digit-bot ladder and its
-  # outsized loss days).
+  # Flat staking only. No martingale, no recovery ladder, no stake
+  # progression of any kind — every trade is $10, regardless of prior
+  # outcomes. Recovery schemes are provably worse than flat on this
+  # bot's own measured numbers (see tools/martingale_sim.py).
   staking:
     name: flat
 
-  # Only needs enough candles for `realised_vol` to return something
-  # positive (Session._consider refuses to trade a symbol with no
-  # measurable volatility) - fixed_notouch itself ignores the candles.
   granularity: 60
   poll_seconds: 20
 
   strategy:
     name: fixed_notouch
-    # R_50's shape (and the default for anything not listed in
-    # barrier_by_symbol) - measured 2026-07-31: 0.30% barrier, 5m, R_50 ->
-    # 96.5% NOTOUCH win rate, 2.32% margin.
-    barrier_pct: 0.003
+    # 0.10% barrier on every symbol — the aggressive/low-win-rate/high-payout
+    # shape. Measured win rates at 5m/0.10%:
+    #   R_50     52.5%  payout ~$18.60  margin 2.37%
+    #   R_75     38.1%  payout ~$25.60  margin 2.45%
+    #   R_100    30.4%  payout ~$32.12  margin 2.34%
+    #   1HZ50V   51.7%  payout ~$18.88  margin 2.40%
+    #   1HZ75V   37.1%  payout ~$26.30  margin 2.44%
+    barrier_pct: 0.001
     horizon_seconds: 300
-    # Per-symbol overrides - see pricebot/signals.py::FixedNoTouch. The same
-    # percentage barrier does NOT buy the same win-rate on every symbol;
-    # each value here was picked from the scan-touch sweep to land near the
-    # same ~93-96% win rate as R_50's default, at this bot's 5-minute
-    # duration:
-    #     R_75     0.40% -> 93.5% win, 2.26% margin
-    #     R_100    0.50% -> 91.7% win, 2.52% margin (only two points tested
-    #              at 5m for R_100 - 0.3%->70.4%, 0.5%->91.7% - closest
-    #              available, not finely tuned to 93-96% like the others)
-    #     1HZ75V   0.40% -> 93.5% win, 2.50% margin
-    # 1HZ50V is NOT listed - it uses the R_50 default (0.30%), and measured
-    # the same 96.5% win rate at 5m/0.3% as R_50 itself.
-    barrier_by_symbol:
-      R_75: 0.004
-      R_100: 0.005
-      1HZ75V: 0.004
+    # No per-symbol overrides — 0.10% on everything. The win rate varies
+    # naturally by symbol volatility (R_100 is most volatile = lowest win
+    # rate = highest payout per win = most variance contribution).
