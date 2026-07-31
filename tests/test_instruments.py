@@ -94,6 +94,25 @@ def test_no_touch_expresses_a_forecast_of_no_move():
     assert p["contract_type"] == "NOTOUCH"
 
 
+def test_no_touch_also_expresses_a_no_view_wide_barrier():
+    """Distinct from the 'quiet market' case above: direction == 0 with a
+    deliberately WIDE move is 'no forecast, buy this win-rate shape' (see
+    deriv_bot/touch_edge.py) - not a claim the price will stay put."""
+    wide = Signal(0, 0.30, 300, 1.0, "fixed cheap barrier")
+    p = build_proposal(wide, TOUCH, "R_50", 3.0)
+    assert p is not None
+    assert p["contract_type"] == "NOTOUCH"
+    assert p["barrier"] == "+0.3000"
+    assert len(p["barrier"].split(".")[1]) <= 4, "Deriv rejects a 5th decimal place"
+
+
+def test_directional_signals_are_unaffected_by_the_no_view_case():
+    """direction != 0 still always means ONETOUCH, regardless of move size -
+    the new no_view branch must not swallow directional signals."""
+    assert build_proposal(up(move=0.30), TOUCH, "R_50", 3.0)["contract_type"] == "ONETOUCH"
+    assert build_proposal(down(move=0.30), TOUCH, "R_50", 3.0)["contract_type"] == "ONETOUCH"
+
+
 # --- no trade is a first-class outcome ----------------------------------
 
 def test_a_signal_with_no_direction_produces_no_trade():

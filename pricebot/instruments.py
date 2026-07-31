@@ -129,7 +129,16 @@ def build_proposal(signal: Signal, instrument: str, symbol: str, stake: float,
         raise ValueError("stake must be positive")
 
     flat = signal.expected_move_pct < FLAT_MOVE_PCT
-    if not signal.actionable and not (instrument == TOUCH and flat):
+    # direction == 0 with a POSITIVE move is a second, distinct "no forecast"
+    # case from `flat`: not "price will stay within a hair of here" but "no
+    # view on direction, price this barrier's win-rate shape" - e.g. a
+    # strategy that buys NOTOUCH at a deliberately WIDE barrier purely for
+    # its margin (see deriv_bot/touch_edge.py). Both collapse to the same
+    # NOTOUCH branch below; `flat` alone is kept for the narrow case so a
+    # directional strategy with a near-zero move still gets NOTOUCH, exactly
+    # as before this was added.
+    no_view = signal.direction == 0 and signal.expected_move_pct > 0
+    if not signal.actionable and not (instrument == TOUCH and (flat or no_view)):
         return None
 
     base: dict[str, Any] = {
@@ -170,12 +179,19 @@ def build_proposal(signal: Signal, instrument: str, symbol: str, stake: float,
         }
 
     # TOUCH - the only instrument that can express "no move expected"
-    if flat:
-        contract, barrier = "NOTOUCH", f"+{signal.expected_move_pct or FLAT_MOVE_PCT:.5f}"
+    #
+    # 4 DECIMAL PLACES, NOT 5. Deriv rejects a relative barrier with a 5th
+    # decimal ("Barrier can only be up to 4 decimal places") - discovered
+    # live the first time this path was ever exercised end to end (no config
+    # had set instrument: touch before deriv_bot/touch_edge.py's scan and
+    # this bot). Every quoted barrier in that scan and in config.notouch.yaml
+    # is at least 0.0001 wide, so 4 places loses no precision that mattered.
+    if flat or no_view:
+        contract, barrier = "NOTOUCH", f"+{signal.expected_move_pct or FLAT_MOVE_PCT:.4f}"
     else:
         contract = "ONETOUCH"
         sign = "+" if signal.direction > 0 else "-"
-        barrier = f"{sign}{signal.expected_move_pct:.5f}"
+        barrier = f"{sign}{signal.expected_move_pct:.4f}"
     return {
         **base,
         "contract_type": contract,

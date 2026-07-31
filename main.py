@@ -19,6 +19,7 @@ from deriv_bot.backtester import (
     approx_net_win, backtest_over_prices, fetch_ticks, last_digit, run_backtest,
 )
 from deriv_bot.edge import scan_edge
+from deriv_bot.touch_edge import DEFAULT_BARRIER_PCTS, DEFAULT_DURATIONS, scan_touch
 from deriv_bot.journal import TradeJournal
 from deriv_bot.ladder_risk import max_base_for_risk, summarise as ladder_summary
 from deriv_bot.multi_scan import (
@@ -248,6 +249,44 @@ def cmd_scan_edge(config: dict[str, Any]) -> None:
         "\nLowest edge % = smallest house margin on this contract right now. "
         "win prob is the theoretical value (digits are ~uniform), not a prediction — "
         "this tells you which bet is cheapest, not which one will win."
+    )
+
+
+def cmd_scan_touch(config: dict[str, Any], symbols: list[str] | None) -> None:
+    load_dotenv()
+    token = os.environ.get("DERIV_API_TOKEN")
+    if not token:
+        sys.exit(
+            "Set DERIV_API_TOKEN in a .env file first (copy .env.example) — "
+            "Deriv's proposal/payout data requires an authorized session, "
+            "even just to look up prices."
+        )
+
+    st_cfg = config.get("scan_trade", {})
+    target_symbols = symbols or st_cfg.get("symbols") or [config["symbol"]]
+    results = asyncio.run(scan_touch(
+        config["app_id"], target_symbols, config["stake"],
+        barrier_pcts=DEFAULT_BARRIER_PCTS, durations=DEFAULT_DURATIONS,
+        currency=config.get("currency", "USD"), token=token,
+    ))
+    if not results:
+        sys.exit(
+            "No ONETOUCH/NOTOUCH quotes returned — check that the symbols are "
+            "currently tradeable and that your token/account supports Touch contracts."
+        )
+    print(f"{'symbol':<8}{'dur':>6}{'barrier':>9}{'margin %':>10}{'NOTOUCH win %':>15}")
+    for r in results:
+        dur = f"{r['duration']}{r['duration_unit']}"
+        print(
+            f"{r['symbol']:<8}{dur:>6}{r['barrier_pct']:>8.3%}"
+            f"{r['margin_pct']:>9.2f}%{r['notouch_win_prob_pct']:>14.1f}%"
+        )
+    print(
+        "\nEV is the same (minus margin) at every barrier — a wider barrier only "
+        "buys a higher NOTOUCH win rate at a correspondingly smaller payout, it "
+        "does not change the expected cost. Pick the margin %% you want to pay, "
+        "not the win %% that looks best; TICK_ANALYSIS.md found no edge to prefer "
+        "one barrier's outcome shape over another's on these feeds."
     )
 
 
@@ -1158,6 +1197,14 @@ def main() -> None:
     )
     scan.add_argument("--config", default="config.yaml")
 
+    touch = sub.add_parser(
+        "scan-touch",
+        help="Query live ONETOUCH/NOTOUCH payouts across barriers/durations and show margin vs win-rate shape",
+    )
+    touch.add_argument("--config", default="config.yaml")
+    touch.add_argument("--symbol", action="append", dest="symbols",
+                       help="Symbol to scan (repeatable); defaults to scan_trade.symbols or config.symbol")
+
     live = sub.add_parser("live", help="Run against live ticks (demo account by default)")
     live.add_argument("--config", default="config.yaml")
     live.add_argument("--dry-run", action="store_true", help="Compute signals but never place trades")
@@ -1235,6 +1282,8 @@ def main() -> None:
         cmd_backtest(config, compare=args.compare)
     elif args.mode == "scan-edge":
         cmd_scan_edge(config)
+    elif args.mode == "scan-touch":
+        cmd_scan_touch(config, args.symbols)
     elif args.mode == "analyze":
         cmd_analyze(config)
     elif args.mode == "study-report":

@@ -29,7 +29,10 @@ param(
     [string]$TaskName = "DerivRiseFallSupervisor",
     [double]$MaxDailyLoss = 700.0,
     [double]$SessionMinutes = 30.0,
-    [double]$TargetProfit = 700.0
+    [double]$TargetProfit = 700.0,
+    [string]$ConfigPath = "config.risefall.yaml",
+    [string]$JournalPath = "risefall_journal.csv",
+    [string]$LogPath = "risefall_live.log"
 )
 
 $ErrorActionPreference = "Stop"
@@ -53,7 +56,8 @@ if (-not (Test-Path $sup)) { throw "supervisor not found at $sup" }
 # pythonw.exe, not python.exe: a console process receives Ctrl-C style
 # console events and dies with STATUS_CONTROL_C_EXIT when the session that
 # started it closes. pythonw has no console, so nothing can send it one.
-$arguments = '-u "{0}" --config config.risefall.yaml --max-daily-loss {1} --target-profit {3} --minutes {2}' -f $sup, $MaxDailyLoss, $SessionMinutes, $TargetProfit
+$arguments = '-u "{0}" --config {1} --journal {2} --log {3} --max-daily-loss {4} --target-profit {5} --minutes {6}' `
+    -f $sup, $ConfigPath, $JournalPath, $LogPath, $MaxDailyLoss, $TargetProfit, $SessionMinutes
 
 $action = New-ScheduledTaskAction -Execute $py -Argument $arguments -WorkingDirectory $repo
 $trigger = New-ScheduledTaskTrigger -AtLogOn
@@ -81,6 +85,6 @@ Get-ScheduledTask -TaskName $TaskName | Select-Object TaskName, State | Format-T
 
 Write-Host ""
 Write-Host "Installed and started. Watch it with:"
-Write-Host "    Get-Content risefall_live.log -Tail 20 -Wait"
+Write-Host "    Get-Content $LogPath -Tail 20 -Wait"
 Write-Host "Stop it with:"
-Write-Host "    .\tools\install_risefall_task.ps1 -Uninstall"
+Write-Host "    .\tools\install_risefall_task.ps1 -TaskName $TaskName -Uninstall"

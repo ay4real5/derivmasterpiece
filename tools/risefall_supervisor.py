@@ -97,7 +97,22 @@ def run_once(config: str, minutes: float, log_path: str) -> int:
 # precisely how two digit-bot supervisors ended up trading side by side. The
 # names below are kept as thin aliases so existing callers and tests do not
 # have to move.
-LOCK_PATH = lockfile.lock_path(REPO, "risefall_supervisor")
+#
+# NAMED PER BOT, not hardcoded. This script now supervises more than one
+# config (Rise/Fall, and this repo's NOTOUCH bot) - a lock hardcoded to
+# "risefall_supervisor" would let two DIFFERENT bots, each convinced it holds
+# the lock, run at once, which is exactly the failure this file exists to
+# prevent. `--lock-name` defaults to the config's own basename so an existing
+# `--config config.risefall.yaml` invocation with no other changes keeps its
+# historical "risefall_supervisor" name.
+DEFAULT_LOCK_NAME = "risefall_supervisor"
+
+
+def lock_name_for(config_path: str) -> str:
+    base = os.path.splitext(os.path.basename(config_path))[0]  # "config.notouch.yaml" -> "config.notouch"
+    if base.startswith("config."):
+        base = base[len("config."):]
+    return DEFAULT_LOCK_NAME if base == "risefall" else base
 
 
 def stale_lock(pid_text: str, pid_alive) -> bool:
@@ -108,12 +123,12 @@ def _pid_alive(pid: int) -> bool:
     return lockfile.pid_alive(pid)
 
 
-def acquire_lock() -> bool:
-    return lockfile.acquire(LOCK_PATH)
+def acquire_lock(lock_path: str) -> bool:
+    return lockfile.acquire(lock_path)
 
 
-def release_lock() -> None:
-    lockfile.release(LOCK_PATH)
+def release_lock(lock_path: str) -> None:
+    lockfile.release(lock_path)
 
 
 def verdict(pnl: float, max_loss: float, target: float) -> str:
@@ -151,25 +166,30 @@ def main() -> None:
     ap.add_argument("--target-profit", type=float, default=0.0,
                     help="stop for the day at this realised profit; 0 disables")
     ap.add_argument("--once", action="store_true")
+    ap.add_argument("--lock-name", default=None,
+                    help="override the pid-lock name; defaults to one derived "
+                         "from --config so different bots never share a lock")
     args = ap.parse_args()
 
     log_path = os.path.join(REPO, args.log)
     journal = os.path.join(REPO, args.journal)
+    lock_path = lockfile.lock_path(REPO, args.lock_name or lock_name_for(args.config))
     failures = 0
 
-    if not acquire_lock():
+    if not acquire_lock(lock_path):
         log("another supervisor already holds the lock - exiting rather than "
             "doubling the trade rate and the daily-loss cap", path=log_path)
         return
 
     log(f"supervisor up | config={args.config} cap={args.max_daily_loss} "
-        f"target={args.target_profit or 'none'} session={args.minutes}m",
+        f"target={args.target_profit or 'none'} session={args.minutes}m "
+        f"lock={os.path.basename(lock_path)}",
         path=log_path)
 
     try:
         _loop(args, journal, log_path, failures)
     finally:
-        release_lock()
+        release_lock(lock_path)
 
 
 def _loop(args, journal: str, log_path: str, failures: int) -> None:

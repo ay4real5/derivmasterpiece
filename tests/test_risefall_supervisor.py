@@ -124,6 +124,24 @@ def test_pid_alive_finds_this_process():
     assert _pid_alive(os.getpid()) is True
 
 
+# --- per-bot lock names ----------------------------------------------------
+
+def test_risefall_config_keeps_its_historical_lock_name():
+    """Any existing --config config.risefall.yaml invocation must keep
+    using the ".risefall_supervisor.lock" name it always has, or a live
+    deployment silently stops recognising its own lock file on upgrade."""
+    from tools.risefall_supervisor import lock_name_for
+    assert lock_name_for("config.risefall.yaml") == "risefall_supervisor"
+
+
+def test_a_different_config_gets_its_own_lock_name():
+    """The bug this exists to prevent: two DIFFERENT bots sharing one lock,
+    each convinced it is the only one running."""
+    from tools.risefall_supervisor import lock_name_for
+    assert lock_name_for("config.notouch.yaml") == "notouch"
+    assert lock_name_for("config.notouch.yaml") != lock_name_for("config.risefall.yaml")
+
+
 def test_child_is_launched_without_a_console():
     """STATUS_CONTROL_C_EXIT killed a session one second after it opened
     because console-control events reach every process sharing a console."""

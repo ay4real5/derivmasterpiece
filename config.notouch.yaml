@@ -1,0 +1,64 @@
+# Touch/No Touch only. Separate file so the digit bot's config.yaml (now
+# stopped in favour of this) and config.pricebot.yaml (multiplier, manual
+# only) are both untouched.
+#
+# REPLACES the digit bot (categories: [even, rise] on R_10/25/50/75,
+# ~3.0% blended margin) rather than running alongside it - see
+# OPERATING_STATE.md for the reasoning and the numbers this was chosen from.
+#
+# Day-level risk (max-daily-loss / target-profit) is NOT set here: pricebot
+# has no RiskManager of its own (that is digit-bot-only). It is enforced by
+# tools/risefall_supervisor.py's own --max-daily-loss/--target-profit flags,
+# which read the journal directly - see tools/install_risefall_task.ps1
+# -ConfigPath config.notouch.yaml -MaxDailyLoss 850 -TargetProfit 1000.
+app_id: 33ULSRYkmDK8Y515CmE1l
+currency: USD
+journal_path: notouch_journal.csv
+
+pricebot:
+  instrument: touch
+
+  # R_50 only, chosen from `python main.py scan-touch --symbol R_10 --symbol
+  # R_25 --symbol R_50 --symbol R_75` (see deriv_bot/touch_edge.py). R_75's
+  # quotes came back barrier-insensitive (same ~3.4% NOTOUCH win-rate from a
+  # 0.1% to a 30% barrier at every duration tried) - a real anomaly, not
+  # usable until investigated separately. R_10/R_25 need a much wider
+  # barrier or longer duration than R_50 to reach a comparable win-rate
+  # because they carry less volatility per unit time by construction (they
+  # ARE Volatility 10/25 vs Volatility 50).
+  symbols: [R_50]
+
+  stake: 3.00
+  max_stake: 3.00
+
+  # Explicit, not derived from horizon_seconds - Touch, like Rise/Fall, is
+  # all-or-nothing at a deadline, so the duration IS the trade.
+  duration: 5
+  duration_unit: m
+
+  # Flat, not a ladder. A NOTOUCH loss is already the full stake (there is
+  # no partial-loss rung to recover from the way a ladder assumes), and the
+  # margin math says every barrier costs the same, so escalating stake after
+  # a loss would only replay the recovery-ladder tail-risk this project has
+  # already measured elsewhere (see OPERATING_STATE.md's 9-rung digit-bot
+  # ladder and its outsized loss days).
+  staking:
+    name: flat
+
+  # Only needs enough candles for `realised_vol` to return something
+  # positive (Session._consider refuses to trade a symbol with no
+  # measurable volatility) - fixed_notouch itself ignores the candles.
+  granularity: 60
+  poll_seconds: 20
+
+  strategy:
+    name: fixed_notouch
+    # 30% barrier over a 5-minute window on R_50: measured at 93.5% NOTOUCH
+    # win-rate, 2.28% margin (`scan-touch` output, symbol R_50, dur 5m,
+    # barrier 30.000%). This is a payout SHAPE, not a forecast - margin was
+    # ~2.3-2.55% across every barrier/duration tried on R_50, so this barrier
+    # was chosen for the win-rate shape, not because it is cheaper than the
+    # alternatives. Re-run scan-touch before trusting this number long after
+    # the fact; margins drift, same caveat as scan-edge.
+    barrier_pct: 0.30
+    horizon_seconds: 300

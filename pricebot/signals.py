@@ -92,6 +92,42 @@ class NeverTrade(Strategy):
         return None
 
 
+class FixedNoTouch(Strategy):
+    """No forecast at all - buys the same NOTOUCH barrier every cycle.
+
+    This is the Touch/No Touch equivalent of `deriv_bot.strategy.LowEdgeStrategy`:
+    it does not try to predict anything, it buys a fixed win-rate SHAPE at
+    whatever margin `deriv_bot/touch_edge.py` measured for that barrier and
+    duration. EV is the same at every barrier (confirmed by that scan's own
+    model-free margin calculation) - `barrier_pct` only changes how often you
+    win and how large the rare loss is, never the expected cost.
+
+    `direction=0` on the emitted Signal is what tells `build_proposal` this
+    is a no-view NOTOUCH rather than a "price will stay put" forecast (see
+    `pricebot/instruments.py`'s `no_view` branch).
+    """
+
+    name = "fixed_notouch"
+
+    def __init__(self, barrier_pct: float = 0.30, horizon_seconds: int = 300):
+        if barrier_pct <= 0:
+            raise ValueError("barrier_pct must be positive")
+        if horizon_seconds <= 0:
+            raise ValueError("horizon_seconds must be positive")
+        self.barrier_pct = barrier_pct
+        self.horizon_seconds = horizon_seconds
+
+    def evaluate(self, candles: Sequence[dict[str, Any]]) -> Signal | None:
+        return Signal(
+            direction=0,
+            expected_move_pct=self.barrier_pct,
+            horizon_seconds=self.horizon_seconds,
+            confidence=1.0,
+            reason=(f"fixed NOTOUCH barrier {self.barrier_pct:.1%} over "
+                    f"{self.horizon_seconds}s - no prediction, see touch_edge scan"),
+        )
+
+
 class Momentum(Strategy):
     """Bets the last `lookback` candles' direction continues.
 
@@ -159,6 +195,7 @@ STRATEGIES: dict[str, type[Strategy]] = {
     "never": NeverTrade,
     "momentum": Momentum,
     "mean_reversion": MeanReversion,
+    "fixed_notouch": FixedNoTouch,
 }
 
 

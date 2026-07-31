@@ -35,7 +35,7 @@ from typing import Any
 from deriv_bot.api import DerivAPI
 from deriv_bot.journal import TradeJournal
 
-from .instruments import INSTRUMENTS, RISE_FALL, build_proposal, stake_for
+from .instruments import INSTRUMENTS, RISE_FALL, TOUCH, build_proposal, stake_for
 from .signals import build_strategy
 from .symbol_cost import move_for_hold, realised_vol
 
@@ -180,7 +180,15 @@ class Session:
             return
 
         signal = self.strategy.evaluate(candles)
-        if signal is None or not signal.actionable:
+        # A no-view TOUCH signal (direction == 0, positive move: "buy this
+        # barrier's win-rate shape, no forecast") is deliberately NOT
+        # actionable in the direction/multiplier/rise-fall sense, so the
+        # usual `actionable` gate would silently drop every FixedNoTouch
+        # signal here before it ever reached build_proposal. See
+        # pricebot/instruments.py's matching `no_view` branch.
+        no_view_touch = (self.instrument == TOUCH and signal is not None
+                         and signal.direction == 0 and signal.expected_move_pct > 0)
+        if signal is None or not (signal.actionable or no_view_touch):
             self._log(f"{symbol}: vol {vol:.1%} - no signal")
             return
 
@@ -190,6 +198,17 @@ class Session:
             # the horizon here would silently change what was backtested.
             target = signal.expected_move_pct
             allowed: tuple[int, ...] = ()
+        elif self.instrument == TOUCH:
+            # Same reasoning as RISE_FALL: the strategy already set the
+            # barrier (fixed, or forecast-derived), and there is no
+            # leverage to look up - `_allowed_multipliers` queries MULTUP's
+            # range, which is meaningless for a Touch contract and was, until
+            # this fix, silently gating every Touch trade on it (an empty or
+            # unrelated range would skip the trade with "no multipliers
+            # offered", a bug that was never exercised because no config had
+            # ever set instrument: touch until now).
+            target = signal.expected_move_pct
+            allowed = ()
         else:
             # The chosen hold time decides the target, not the other way round.
             target = move_for_hold(self.hold_seconds, vol)
@@ -242,6 +261,14 @@ class Session:
                 f"OPEN    {symbol} {params['contract_type']} "
                 f"stake {stake_paid:.2f} rung {rung} payout {payout:.2f} "
                 f"({payout/stake_paid:.4f}x, break-even {be:.1%}) "
+                f"for {params['duration']}{params['duration_unit']} | {signal.reason}"
+            )
+        elif self.instrument == TOUCH:
+            payout = float(proposal.get("payout") or 0.0)
+            stake_paid = float(params["amount"])
+            self._log(
+                f"OPEN    {symbol} {params['contract_type']} barrier {params['barrier']} "
+                f"stake {stake_paid:.2f} payout {payout:.2f} "
                 f"for {params['duration']}{params['duration_unit']} | {signal.reason}"
             )
         else:

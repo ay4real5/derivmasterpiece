@@ -19,6 +19,8 @@ scratch_*.json
 scratch_*.py
 risefall_journal.csv
 risefall_live.log
+notouch_journal.csv
+.notouch_supervisor.lock
 bybit_cache/
 .risefall_supervisor.lock
 install_task_out.log

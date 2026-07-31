@@ -1,6 +1,7 @@
 import pytest
 
 from pricebot.signals import (
+    FixedNoTouch,
     MeanReversion,
     Momentum,
     NeverTrade,
@@ -102,3 +103,37 @@ def test_momentum_rejects_bad_parameters():
         Momentum(lookback=1)
     with pytest.raises(ValueError):
         Momentum(min_move_pct=0)
+
+
+# --- fixed_notouch -------------------------------------------------------
+
+def test_fixed_notouch_always_fires_the_same_shape_regardless_of_candles():
+    """No forecast: it doesn't look at the candles at all, unlike every
+    other strategy here."""
+    s = FixedNoTouch(barrier_pct=0.30, horizon_seconds=300)
+    for data in ([], candles([100, 105, 110]), candles([100, 90, 80, 200])):
+        sig = s.evaluate(data)
+        assert sig.direction == 0
+        assert sig.expected_move_pct == 0.30
+        assert sig.horizon_seconds == 300
+
+
+def test_fixed_notouch_is_not_actionable_but_is_a_deliberate_no_view():
+    """direction == 0 means Signal.actionable is False - this is what tells
+    build_proposal/runner.py it is a no-view TOUCH bet, not a dead signal."""
+    sig = FixedNoTouch().evaluate([])
+    assert not sig.actionable
+    assert sig.direction == 0 and sig.expected_move_pct > 0
+
+
+def test_fixed_notouch_rejects_bad_parameters():
+    with pytest.raises(ValueError):
+        FixedNoTouch(barrier_pct=0)
+    with pytest.raises(ValueError):
+        FixedNoTouch(horizon_seconds=0)
+
+
+def test_fixed_notouch_is_registered():
+    s = build_strategy("fixed_notouch", barrier_pct=0.2, horizon_seconds=120)
+    assert isinstance(s, FixedNoTouch)
+    assert s.barrier_pct == 0.2
