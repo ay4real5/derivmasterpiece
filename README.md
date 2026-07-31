@@ -23,13 +23,19 @@ it was running - see "Docs vs. reality" below for how that was found.
 | Rise/Fall bot (PDF strategy) | not deployed | `config.risefall.yaml` | `tools/risefall_supervisor.py` | `risefall_journal.csv` | `risefall_live.log` |
 | Multiplier pricebot | manual only | `config.pricebot.yaml` | — | `pricebot_journal.csv` | — |
 
-NOTOUCH trades **R_50 only**, a fixed 30%-of-spot barrier over a 5-minute
-window, flat 3.00 stake, no ladder. Chosen with `python main.py scan-touch`
-(see `deriv_bot/touch_edge.py`): ~93.5% win rate at ~2.28% margin, cheaper
-than the digit bot's blended ~3.0% (even/rise categories) and, like every
+NOTOUCH trades **5 symbols** (R_50, R_75, R_100, 1HZ50V, 1HZ75V), each with
+its own barrier tuned to land near a ~93-96% win rate over the same 5-minute
+window, flat 3.00 stake per symbol, no ladder. Chosen with
+`python main.py scan-touch` (see `deriv_bot/touch_edge.py`) - cheaper than
+the digit bot's blended ~3.0% (even/rise categories) and, like every
 contract measured in this repo, no better than that margin in expectation -
 a wider barrier buys a higher win rate at the same expected cost, not an
-edge. `-850`/`+1000` daily loss/target caps, matching the digit bot's scale.
+edge. `-1000`/`+1200` daily loss/target caps (raised from 850/1000 for 5x
+the trading volume - a deliberate, non-proportional bump, not a proper
+re-derivation; see OPERATING_STATE.md's Open section). The barrier itself
+is a genuine percentage of the symbol's current spot price, scaled and
+decimal-capped per symbol at request time - it was NOT always this way; see
+OPERATING_STATE.md's bug list for what it takes to get that wrong.
 
 **Only one supervisor per bot-name lock can run at a time** (`tools/lockfile.py`,
 named per `--config` since `tools/risefall_supervisor.py` started supervising
@@ -52,7 +58,7 @@ PowerShell required** (`-ExecutionPolicy Bypass` if scripts are blocked in
 that session):
 
 ```powershell
-.\tools\install_risefall_task.ps1 -TaskName DerivNoTouchSupervisor -ConfigPath config.notouch.yaml -JournalPath notouch_journal.csv -LogPath notouch_live.log -MaxDailyLoss 850 -TargetProfit 1000
+.\tools\install_risefall_task.ps1 -TaskName DerivNoTouchSupervisor -ConfigPath config.notouch.yaml -JournalPath notouch_journal.csv -LogPath notouch_live.log -MaxDailyLoss 1000 -TargetProfit 1200
 .\tools\install_risefall_task.ps1 -TaskName DerivNoTouchSupervisor -Uninstall
 Get-Content notouch_live.log -Tail 20 -Wait   # watch it
 ```
@@ -64,7 +70,7 @@ other flags needed) if it's ever re-enabled.
 ### Changing settings: always redeploy, never assume
 
 ```powershell
-python -m tools.check_deploy --config config.notouch.yaml --log notouch_live.log --cap 850 --target 1000
+python -m tools.check_deploy --config config.notouch.yaml --log notouch_live.log --cap 1000 --target 1200
 .\tools\redeploy.ps1              # restart, and prove the new settings took
 ```
 
