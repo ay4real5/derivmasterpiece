@@ -35,3 +35,5 @@ sr_cache/
 signals.csv
 sr_trades.csv
 lines.json.keep
+sr_bot.log
+sr_bot.err
