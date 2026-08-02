@@ -1,0 +1,13 @@
+[
+  {
+    "_comment": "YOUR levels. Draw them on the 5m/10m V50 chart, read the price off, put it here. Set active:false to park one without deleting it. Edit while the bot runs - it reloads every cycle and keeps each line's cooldown and daily count.",
+    "_reference": "R_50 spot was 108.9573 when this file was created; the last 5 hours spanned 108.33 to 110.15. Those are for orientation only - replace every entry below with levels YOU chose.",
+    "name": "_template",
+    "symbol": "R_50",
+    "price_level": 108.9573,
+    "type": "support",
+    "timeframe": "5m",
+    "tolerance_pct": 0.15,
+    "active": false
+  }
+]

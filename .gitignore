@@ -32,3 +32,6 @@ consolidate_out.log
 .day_reset
 .env.bak*
 sr_cache/
+signals.csv
+sr_trades.csv
+lines.json.keep
