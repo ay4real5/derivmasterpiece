@@ -32,6 +32,11 @@ from pricebot.sr_lines import (
 SIGNALS_CSV = "signals.csv"
 TRADES_CSV = "sr_trades.csv"
 
+# Consecutive data failures before tearing the socket down and redialling, and
+# how many redials before admitting the problem is not the market.
+MAX_FAILS = 3
+MAX_RECONNECTS = 10
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -127,6 +132,8 @@ async def main() -> None:
         deadline = time.monotonic() + args.minutes * 60
         open_trades = 0
         taken = 0
+        fails = 0
+        reconnect_fails = 0
 
         while time.monotonic() < deadline:
             cycle = time.monotonic()
@@ -152,9 +159,42 @@ async def main() -> None:
                     duration=args.duration, duration_unit="s")
                 payout = float(quote["proposal"]["payout"]) / args.stake
             except Exception as exc:                      # noqa: BLE001
-                log(f"market data unavailable ({type(exc).__name__}) - skipping cycle")
+                # RECONNECT, do not just skip. A dropped websocket does not
+                # heal by waiting: the first version logged "market data
+                # unavailable" every 20 seconds for hours while the socket
+                # stayed dead and no trade was ever considered. The digit bot
+                # survives this only because its supervisor restarts the child;
+                # a standalone script has to do it itself.
+                fails += 1
+                log(f"market data unavailable ({type(exc).__name__}) "
+                    f"[{fails}/{MAX_FAILS}]")
+                if fails >= MAX_FAILS:
+                    log("reconnecting the websocket ...")
+                    try:
+                        await api.close()
+                    except Exception:                     # noqa: BLE001
+                        pass
+                    try:
+                        url = await api.request_trading_ws_url(
+                            token, acct["account_id"])
+                        await api.connect(url)
+                        bal = float((await api.balance())["balance"]["balance"])
+                        log(f"reconnected, balance {bal:.2f}")
+                        fails = 0
+                    except Exception as exc2:             # noqa: BLE001
+                        reconnect_fails += 1
+                        log(f"reconnect failed ({type(exc2).__name__}) - "
+                            f"attempt {reconnect_fails}/{MAX_RECONNECTS}")
+                        if reconnect_fails >= MAX_RECONNECTS:
+                            log("giving up; the token or the network is the "
+                                "problem, not the market")
+                            return
+                        await asyncio.sleep(min(60, 5 * reconnect_fails))
                 await asyncio.sleep(args.poll)
                 continue
+            else:
+                fails = 0
+                reconnect_fails = 0
 
             for ln in mark_broken(active, price):
                 log(f"LINE BROKEN: {ln.name} - price {price:.4f} closed through "
