@@ -183,3 +183,49 @@ def test_a_level_is_not_known_until_the_confirming_candle_CLOSES():
         assert lv["known_epoch"] >= lv["epoch"] + 3 * 300, (
             f"known at {lv['known_epoch']} for a swing at {lv['epoch']} - "
             f"that is before the confirming candle has closed")
+
+
+# --- level strength, the part a swing detector misses ----------------------
+
+def test_nearby_swings_merge_into_one_level_with_a_touch_count():
+    from pricebot.sr_backtest import cluster_levels
+    lv = [{"price": 100.00, "type": "support", "epoch": 0, "known_epoch": 10},
+          {"price": 100.05, "type": "support", "epoch": 60, "known_epoch": 70},
+          {"price": 105.00, "type": "support", "epoch": 120, "known_epoch": 130}]
+    got = cluster_levels(lv, band_pct=0.10)
+    assert len(got) == 2
+    merged = [g for g in got if g["price"] < 101][0]
+    assert merged["touches"] == 2
+
+
+def test_a_merged_level_is_known_only_when_its_LAST_touch_is():
+    """Otherwise a level claims strength from touches that had not happened."""
+    from pricebot.sr_backtest import cluster_levels
+    lv = [{"price": 100.00, "type": "support", "epoch": 0, "known_epoch": 10},
+          {"price": 100.02, "type": "support", "epoch": 600, "known_epoch": 700}]
+    got = cluster_levels(lv, band_pct=0.10)
+    assert got[0]["known_epoch"] == 700
+
+
+def test_a_lone_swing_keeps_one_touch():
+    from pricebot.sr_backtest import cluster_levels
+    got = cluster_levels([{"price": 100.0, "type": "support",
+                           "epoch": 0, "known_epoch": 10}])
+    assert got[0]["touches"] == 1
+
+
+def test_requiring_more_touches_never_increases_the_trade_count():
+    """A stricter filter can only remove levels. If it adds trades, the filter
+    is inverted and every comparison below is meaningless."""
+    import random
+    from pricebot.sr_backtest import run_clustered
+    rng = random.Random(31)
+    prices = [100.0]
+    for _ in range(4000):
+        prices.append(prices[-1] * (1 + rng.gauss(0, 0.001)))
+    m1 = series(prices)
+    htf = series(prices[::5], step=300)
+    a = run_clustered(m1, htf, min_touches=1)
+    b = run_clustered(m1, htf, min_touches=3)
+    assert b["trades"] <= a["trades"]
+    assert b["levels"] <= a["levels"]

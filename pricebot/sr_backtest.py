@@ -219,3 +219,77 @@ def run(candles_1m: Sequence[dict[str, Any]],
         "levels": len(levels),
         "skipped_no_confirmation": near_misses,
     }
+
+
+def cluster_levels(levels: Sequence[dict[str, Any]], band_pct: float = 0.10
+                   ) -> list[dict[str, Any]]:
+    """Merge nearby swings into ONE level carrying a touch count.
+
+    This is the part of "draw support and resistance" that a swing detector
+    misses. A human does not draw a line at every swing high - they draw where
+    price has REACTED MORE THAN ONCE, and a level tested three times is treated
+    as a different object from a lone pivot. `touches` makes that testable.
+
+    A merged level is known only when its LAST contributing swing is known, so
+    a level cannot claim strength from touches that had not happened yet - the
+    same causality rule the individual swings follow.
+    """
+    out: list[dict[str, Any]] = []
+    for lv in sorted(levels, key=lambda z: z["price"]):
+        placed = False
+        for group in out:
+            if abs(lv["price"] - group["price"]) / group["price"] * 100 <= band_pct:
+                n = group["touches"]
+                group["price"] = (group["price"] * n + lv["price"]) / (n + 1)
+                group["touches"] = n + 1
+                group["known_epoch"] = max(group["known_epoch"], lv["known_epoch"])
+                group["epoch"] = max(group["epoch"], lv["epoch"])
+                placed = True
+                break
+        if not placed:
+            out.append({**lv, "touches": 1})
+    return out
+
+
+def run_clustered(candles_1m: Sequence[dict[str, Any]],
+                  htf_candles: Sequence[dict[str, Any]], *, k: int = 2,
+                  tolerance_pct: float = 0.15, min_touches: int = 2,
+                  band_pct: float = 0.10, cooldown_seconds: int = 1800,
+                  max_age_seconds: int = 6 * 3600,
+                  require_confirmation: bool = True) -> dict[str, Any]:
+    """The same rules, but only at levels tested at least `min_touches` times."""
+    levels = cluster_levels(swing_levels(htf_candles, k=k), band_pct=band_pct)
+    levels = [lv for lv in levels if lv["touches"] >= min_touches]
+    annotate_breaks(levels, htf_candles, tolerance_pct)
+
+    trades: list[dict[str, Any]] = []
+    last_fire: dict[float, int] = {}
+    for i in range(len(candles_1m) - 1):
+        c = candles_1m[i]
+        now = int(c["epoch"])
+        price = _f(c, "close")
+        for lv in active_lines(levels, now, max_age_seconds):
+            if abs(price - lv["price"]) > lv["price"] * tolerance_pct / 100.0:
+                continue
+            bk = lv.get("break_epoch")
+            if bk is not None and bk <= now:
+                continue
+            key = round(lv["price"], 6)
+            if now - last_fire.get(key, -10**9) < cooldown_seconds:
+                continue
+            want_up = lv["type"] == "support"
+            if require_confirmation and not confirmed(candles_1m, i, want_up):
+                continue
+            entry, exit_ = price, _f(candles_1m[i + 1], "close")
+            trades.append({"won": exit_ > entry if want_up else exit_ < entry,
+                           "touches": lv["touches"]})
+            last_fire[key] = now
+            break
+
+    n = len(trades)
+    wins = sum(1 for t in trades if t["won"])
+    rate = wins / n if n else 0.0
+    se = math.sqrt(0.25 / n) if n else 0.0
+    return {"trades": n, "wins": wins, "win_rate": rate,
+            "levels": len(levels), "se_pp": se * 100,
+            "z_vs_break_even": ((rate - BREAK_EVEN) / se) if se else 0.0}
