@@ -1,56 +1,38 @@
 [
   {
-    "name": "R1",
+    "name": "L1",
     "symbol": "R_50",
-    "price_level": 107.4699,
-    "type": "resistance",
-    "timeframe": "10m",
-    "tolerance_pct": 0.15,
-    "active": false
-  },
-  {
-    "name": "R2",
-    "symbol": "R_50",
-    "price_level": 107.264,
-    "type": "resistance",
-    "timeframe": "10m+5m",
-    "tolerance_pct": 0.15,
-    "active": true
-  },
-  {
-    "name": "R3",
-    "symbol": "R_50",
-    "price_level": 107.0904,
-    "type": "resistance",
-    "timeframe": "10m",
-    "tolerance_pct": 0.15,
-    "active": true
-  },
-  {
-    "name": "R4",
-    "symbol": "R_50",
-    "price_level": 106.9576,
+    "price_level": 104.5045,
     "type": "resistance",
     "timeframe": "5m",
     "tolerance_pct": 0.15,
     "active": false
   },
   {
-    "name": "R5",
+    "name": "L2",
     "symbol": "R_50",
-    "price_level": 106.9157,
-    "type": "resistance",
-    "timeframe": "10m",
-    "tolerance_pct": 0.15,
-    "active": false
-  },
-  {
-    "name": "R6",
-    "symbol": "R_50",
-    "price_level": 106.7839,
+    "price_level": 104.4207,
     "type": "resistance",
     "timeframe": "5m",
     "tolerance_pct": 0.15,
     "active": true
+  },
+  {
+    "name": "L3",
+    "symbol": "R_50",
+    "price_level": 104.0,
+    "type": "support",
+    "timeframe": "5m",
+    "tolerance_pct": 0.15,
+    "active": true
+  },
+  {
+    "name": "L4",
+    "symbol": "R_50",
+    "price_level": 103.9566,
+    "type": "support",
+    "timeframe": "5m",
+    "tolerance_pct": 0.15,
+    "active": false
   }
 ]
