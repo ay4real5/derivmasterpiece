@@ -15,7 +15,7 @@
     "type": "resistance",
     "timeframe": "5m",
     "tolerance_pct": 0.15,
-    "active": true
+    "active": false
   },
   {
     "name": "L3",
@@ -24,7 +24,7 @@
     "type": "support",
     "timeframe": "5m",
     "tolerance_pct": 0.15,
-    "active": true
+    "active": false
   },
   {
     "name": "L4",
@@ -34,5 +34,23 @@
     "timeframe": "5m",
     "tolerance_pct": 0.15,
     "active": false
+  },
+  {
+    "name": "L5",
+    "symbol": "R_50",
+    "price_level": 107.3098,
+    "type": "resistance",
+    "timeframe": "10m",
+    "tolerance_pct": 0.15,
+    "active": true
+  },
+  {
+    "name": "L6",
+    "symbol": "R_50",
+    "price_level": 105.8986,
+    "type": "support",
+    "timeframe": "5m",
+    "tolerance_pct": 0.15,
+    "active": true
   }
 ]

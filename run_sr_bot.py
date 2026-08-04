@@ -28,9 +28,11 @@ from deriv_bot.api import DerivAPI
 from pricebot.sr_lines import (
     Limits, break_even, decide, load_lines, mark_broken, merge_state,
 )
+from tools import lockfile
 
 SIGNALS_CSV = "signals.csv"
 TRADES_CSV = "sr_trades.csv"
+LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".sr_bot.lock")
 
 # Consecutive data failures before tearing the socket down and redialling, and
 # how many redials before admitting the problem is not the market.
@@ -100,6 +102,18 @@ async def main() -> None:
     if os.environ.get("DEMO_MODE", "true").strip().lower() == "false":
         sys.exit("This bot is demo-only. Unset DEMO_MODE=false to run it.")
 
+    if not lockfile.acquire(LOCK_PATH):
+        sys.exit("another run_sr_bot.py already holds the lock - exiting "
+                 "rather than doubling the trade rate against the same "
+                 "lines.json and the same daily-loss cap")
+
+    try:
+        await _run(args, token)
+    finally:
+        lockfile.release(LOCK_PATH)
+
+
+async def _run(args, token: str) -> None:
     cfg = yaml.safe_load(open("config.yaml", encoding="utf-8"))
     limits = Limits(stake=args.stake, max_daily_loss=args.max_daily_loss,
                     cooldown_seconds=args.cooldown,
