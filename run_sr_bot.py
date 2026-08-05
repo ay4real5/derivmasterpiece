@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 from deriv_bot.api import DerivAPI
 from pricebot.sr_lines import (
     Limits, break_even, decide, load_lines, mark_broken, merge_state,
+    trend_direction,
 )
 from tools import lockfile
 
@@ -87,10 +88,16 @@ async def main() -> None:
     ap.add_argument("--minutes", type=float, default=60.0)
     ap.add_argument("--poll", type=float, default=15.0)
     ap.add_argument("--duration", type=int, default=55)
-    ap.add_argument("--stake", type=float, default=0.35)
-    ap.add_argument("--max-daily-loss", type=float, default=20.0)
+    ap.add_argument("--stake", type=float, default=5.0)
+    ap.add_argument("--max-daily-loss", type=float, default=1000.0)
     ap.add_argument("--cooldown", type=int, default=1800)
     ap.add_argument("--max-per-line", type=int, default=3)
+    ap.add_argument("--martingale-steps", type=int, default=6,
+                    help="max consecutive losing trades before resetting "
+                         "stake to base (0 = flat, no ladder)")
+    ap.add_argument("--martingale-mult", type=float, default=2.0,
+                    help="stake multiplier after each loss (2.0 = classic "
+                         "double-up)")
     ap.add_argument("--dry-run", action="store_true",
                     help="decide and log, never place an order")
     args = ap.parse_args()
@@ -139,6 +146,12 @@ async def _run(args, token: str) -> None:
         log(f"watching {len(live)} line(s) on {args.symbol}, "
             f"{args.duration}s Rise/Fall, stake {args.stake:.2f}"
             + ("  [DRY RUN]" if args.dry_run else ""))
+        if args.martingale_steps > 0:
+            ladder = [args.stake * args.martingale_mult ** i
+                      for i in range(args.martingale_steps)]
+            log(f"   martingale: {args.martingale_steps} steps x{args.martingale_mult} "
+                f"-> {', '.join(f'{s:.2f}' for s in ladder)} "
+                f"(max ladder loss ${sum(ladder):.2f})")
         for ln in live:
             log(f"   {ln.name}: {ln.type} @ {ln.price_level:.4f} "
                 f"+/-{ln.tolerance_pct:.3f}% ({ln.timeframe})")
@@ -148,6 +161,8 @@ async def _run(args, token: str) -> None:
         taken = 0
         fails = 0
         reconnect_fails = 0
+        ladder_step = 0
+        current_stake = args.stake
 
         while time.monotonic() < deadline:
             cycle = time.monotonic()
@@ -165,6 +180,7 @@ async def _run(args, token: str) -> None:
 
             try:
                 candles = await api.candles(args.symbol, granularity=60, count=10)
+                candles_15m = await api.candles(args.symbol, granularity=900, count=20)
                 price = float((await api.ticks_history(args.symbol, count=1))
                               ["history"]["prices"][-1])
                 quote = await api.proposal(
@@ -215,8 +231,10 @@ async def _run(args, token: str) -> None:
                     f"{ln.price_level:.4f}; it will not be traded again")
 
             pnl = day_pnl(TRADES_CSV, day)
+            trend = trend_direction(candles_15m)
             d = decide(price, active, candles, int(time.time()), limits,
-                       open_trades=open_trades, day_pnl=pnl, payout=payout)
+                       open_trades=open_trades, day_pnl=pnl, payout=payout,
+                       trend=trend)
 
             append(SIGNALS_CSV, {
                 "timestamp": now_utc().isoformat(), "symbol": args.symbol,
@@ -225,6 +243,7 @@ async def _run(args, token: str) -> None:
                 "line": d.line.name if d.line else "",
                 "direction": d.direction, "reason": d.reason,
                 "day_pnl": f"{pnl:.2f}",
+                "trend": trend,
             })
 
             if not d.tradeable:
@@ -240,7 +259,7 @@ async def _run(args, token: str) -> None:
                     try:
                         p = (await api.proposal(
                             contract_type=ctype, underlying_symbol=args.symbol,
-                            amount=args.stake, basis="stake", currency="USD",
+                            amount=current_stake, basis="stake", currency="USD",
                             duration=args.duration, duration_unit="s"))["proposal"]
                         bought = await api.buy(p["id"], float(p["ask_price"]))
                         cid = bought["buy"]["contract_id"]
@@ -248,20 +267,73 @@ async def _run(args, token: str) -> None:
                         taken += 1
                         d.line.last_trade_epoch = int(time.time())
                         d.line.trades_today += 1
-                        log(f"   BOUGHT {ctype} {cid} stake {args.stake:.2f} "
+                        log(f"   BOUGHT {ctype} {cid} stake {current_stake:.2f} "
+                            f"(ladder step {ladder_step+1}/{args.martingale_steps or 1}) "
                             f"payout {p['payout']} ({payout:.4f}x, break-even "
                             f"{break_even(payout)*100:.2f}%)")
-                        contract = await api.wait_for_settlement(cid, timeout=600)
-                        profit = float(contract.get("profit") or 0.0)
+                        # Try streaming settlement first (fast path), fall back
+                        # to profit_table query if the websocket dies mid-wait.
+                        # The stream hang was causing every trade to block for
+                        # 600s with no log, no ladder update, and no restart.
+                        profit = None
+                        try:
+                            contract = await api.wait_for_settlement(cid, timeout=120)
+                            profit = float(contract.get("profit") or 0.0)
+                        except Exception as exc:              # noqa: BLE001
+                            log(f"   settlement stream failed "
+                                f"({type(exc).__name__}) - polling profit table")
+                            for _attempt in range(6):
+                                await asyncio.sleep(15)
+                                try:
+                                    pt = await api.send({
+                                        "profit_table": 1, "description": 1,
+                                        "limit": 10, "sort": "DESC",
+                                    })
+                                    for tx in pt.get("profit_table", {}).get("transactions", []):
+                                        if tx.get("contract_id") == cid:
+                                            sell = float(tx.get("sell_price") or 0)
+                                            profit = sell - current_stake
+                                            break
+                                    if profit is not None:
+                                        break
+                                except Exception:              # noqa: BLE001
+                                    pass
+                        if profit is None:
+                            log(f"   could not settle {cid} - assuming loss, "
+                                f"ladder steps up as precaution")
+                            profit = -current_stake
                         open_trades -= 1
                         log(f"   SETTLED {profit:+.2f}")
                         append(TRADES_CSV, {
                             "timestamp": now_utc().isoformat(),
                             "symbol": args.symbol, "line": d.line.name,
-                            "type": ctype, "stake": f"{args.stake:.2f}",
+                            "type": ctype, "stake": f"{current_stake:.2f}",
                             "payout": p["payout"], "profit": f"{profit:.2f}",
                             "contract_id": cid,
+                            "ladder_step": ladder_step,
                         })
+                        # Martingale ladder: on loss step up, on win reset.
+                        if args.martingale_steps > 0:
+                            if profit < 0:
+                                ladder_step += 1
+                                if ladder_step >= args.martingale_steps:
+                                    log(f"   ladder exhausted at step "
+                                        f"{ladder_step} - resetting to base "
+                                        f"${args.stake:.2f}")
+                                    ladder_step = 0
+                                    current_stake = args.stake
+                                else:
+                                    current_stake = round(
+                                        args.stake * args.martingale_mult ** ladder_step, 2)
+                                    log(f"   loss -> ladder step {ladder_step+1}, "
+                                        f"next stake ${current_stake:.2f}")
+                            elif profit > 0:
+                                if ladder_step > 0:
+                                    log(f"   win recovered ladder (was step "
+                                        f"{ladder_step+1}) - resetting to base "
+                                        f"${args.stake:.2f}")
+                                ladder_step = 0
+                                current_stake = args.stake
                     except Exception as exc:              # noqa: BLE001
                         open_trades = max(0, open_trades - 1)
                         log(f"   order failed ({type(exc).__name__}: {exc})")
@@ -277,4 +349,5 @@ async def _run(args, token: str) -> None:
         await api.close()
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -198,15 +198,57 @@ class Decision:
     tradeable: bool = field(default=False)
 
 
+def trend_direction(candles: Sequence[dict[str, Any]], lookback: int = 10) -> int:
+    """Classify the trend on a higher timeframe. +1 up, -1 down, 0 flat.
+
+    Uses the slope of the last `lookback` closes plus higher-high/lower-low
+    structure. Two agreement = a trend, one or zero = flat. This is the filter
+    that stops the bot buying CALLs at support while the 15m is crashing
+    through it - which was the pattern in the first 10 live trades (30% win
+    rate, every loss a CALL bought against a downtrend).
+    """
+    if len(candles) < lookback:
+        return 0
+    recent = candles[-lookback:]
+    closes = [float(c["close"]) for c in recent]
+    highs = [float(c["high"]) for c in recent]
+    lows = [float(c["low"]) for c in recent]
+    # Slope: compare first half average to second half average.
+    mid = lookback // 2
+    avg_first = sum(closes[:mid]) / max(mid, 1)
+    avg_second = sum(closes[mid:]) / max(lookback - mid, 1)
+    slope_up = avg_second > avg_first
+    slope_down = avg_second < avg_first
+    # Structure: higher highs + higher lows = uptrend, vice versa = downtrend.
+    hh = max(highs[mid:]) > max(highs[:mid])
+    hl = min(lows[mid:]) >= min(lows[:mid])
+    ll = min(lows[mid:]) < min(lows[:mid])
+    lh = max(highs[mid:]) <= max(highs[:mid])
+    struct_up = hh and hl
+    struct_down = ll and lh
+    if (slope_up and struct_up) or (slope_up and hh) or (struct_up and slope_up):
+        return 1
+    if (slope_down and struct_down) or (slope_down and ll) or (struct_down and slope_down):
+        return -1
+    return 0
+
+
 def decide(price: float, lines: Sequence[Line], candles_1m: Sequence[dict[str, Any]],
            now_epoch: int, limits: Limits, *, open_trades: int = 0,
            day_pnl: float = 0.0, payout: float = DEFAULT_PAYOUT,
-           confirm: bool = True) -> Decision:
+           confirm: bool = True,
+           trend: int = 0) -> Decision:
     """The whole entry rule set, in the proposal's own order.
 
     Returns a Decision every time. A skip is never silent, because "no trade"
     with a reason is the data that tells you whether your levels are wrong or
     the confirmation is simply strict.
+
+    The `trend` argument (+1 up, -1 down, 0 flat) is the higher-timeframe trend
+    from `trend_direction`. When non-zero, the bot only trades in that
+    direction: CALL (support bounce) only if trend is up, PUT (resistance
+    rejection) only if trend is down. This filters out the majority of losses
+    seen in live testing - support bought while the 15m was falling through it.
     """
     from .sr_backtest import confirmed          # one confirmation implementation
 
@@ -236,12 +278,20 @@ def decide(price: float, lines: Sequence[Line], candles_1m: Sequence[dict[str, A
         if (ln.last_trade_epoch is not None
                 and now_epoch - ln.last_trade_epoch < limits.cooldown_seconds):
             continue
+        # Trend filter: only trade support bounces in an uptrend, resistance
+        # rejections in a downtrend. When trend is flat (0), allow both - the
+        # 1m confirmation is the only gate in that case.
+        if trend > 0 and not ln.wants_up:
+            continue
+        if trend < 0 and ln.wants_up:
+            continue
         if confirm and not confirmed(candles_1m, len(candles_1m) - 1, ln.wants_up):
             continue
+        trend_label = f", 15m trend {'UP' if trend > 0 else 'DOWN' if trend < 0 else 'FLAT'}"
         return Decision(ln, 1 if ln.wants_up else -1,
                         f"{ln.name} ({ln.type}) at {ln.price_level:.4f}, price "
                         f"{price:.4f}, 1m confirms "
-                        f"{'RISE' if ln.wants_up else 'FALL'}",
+                        f"{'RISE' if ln.wants_up else 'FALL'}{trend_label}",
                         tradeable=True)
 
     # Something was near, but nothing passed. Say which gate stopped it.
@@ -252,6 +302,10 @@ def decide(price: float, lines: Sequence[Line], candles_1m: Sequence[dict[str, A
           and now_epoch - ln.last_trade_epoch < limits.cooldown_seconds):
         left = limits.cooldown_seconds - (now_epoch - ln.last_trade_epoch)
         why = f"{ln.name} in cooldown for another {left}s"
+    elif trend > 0 and not ln.wants_up:
+        why = f"at {ln.name} (resistance) but 15m trend is UP - no PUT against trend"
+    elif trend < 0 and ln.wants_up:
+        why = f"at {ln.name} (support) but 15m trend is DOWN - no CALL against trend"
     else:
         why = f"at {ln.name} but the 1m candles do not confirm"
     return Decision(None, 0, why)
