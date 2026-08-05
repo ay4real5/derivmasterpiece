@@ -177,7 +177,7 @@ async def _run(args, token: str) -> None:
         # up through resistance, so PUTs were throwing money away.
         call_streak = 0       # consecutive CALL losses
         put_streak = 0        # consecutive PUT losses
-        DIRECTION_BLOCK_AFTER = 3  # block a direction after this many losses
+        DIRECTION_BLOCK_AFTER = 2  # block a direction after this many losses
         call_blocked = False
         put_blocked = False
 
