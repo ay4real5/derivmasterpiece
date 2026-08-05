@@ -22,7 +22,7 @@ async def main():
                 if a.get("account_type") == "demo")
     await api.connect(await api.request_trading_ws_url(token, acct["account_id"]))
 
-    for label, gran, count in [("1H", 3600, 100), ("15m", 900, 200), ("5m", 300, 200)]:
+    for label, gran, count in [("10m", 600, 200), ("5m", 300, 300), ("3m", 180, 300), ("1m", 60, 300)]:
         try:
             candles = await api.candles("R_50", granularity=gran, count=count)
             highs = [float(c["high"]) for c in candles]

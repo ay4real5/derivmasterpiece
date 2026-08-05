@@ -90,6 +90,9 @@ async def main() -> None:
     ap.add_argument("--duration", type=int, default=55)
     ap.add_argument("--stake", type=float, default=5.0)
     ap.add_argument("--max-daily-loss", type=float, default=1000.0)
+    ap.add_argument("--target-profit", type=float, default=0.0,
+                    help="stop trading for the day once this profit is "
+                         "reached (0 = no target, run until session ends)")
     ap.add_argument("--cooldown", type=int, default=1800)
     ap.add_argument("--max-per-line", type=int, default=3)
     ap.add_argument("--martingale-steps", type=int, default=6,
@@ -100,6 +103,10 @@ async def main() -> None:
                          "double-up)")
     ap.add_argument("--dry-run", action="store_true",
                     help="decide and log, never place an order")
+    ap.add_argument("--no-confirm", action="store_true",
+                    help="skip 1m candle confirmation - trade as soon as "
+                         "price is in the zone and trend allows. High-volume "
+                         "mode; more trades but lower quality.")
     args = ap.parse_args()
 
     load_dotenv(override=True)
@@ -163,6 +170,16 @@ async def _run(args, token: str) -> None:
         reconnect_fails = 0
         ladder_step = 0
         current_stake = args.stake
+        # Adaptive direction learning: track recent CALL/PUT results. If one
+        # direction loses N times in a row, stop trading it until a win resets
+        # the counter. This caught the pattern where PUTs at resistance lost
+        # 4 in a row while CALLs at support won 4 in a row - price was pushing
+        # up through resistance, so PUTs were throwing money away.
+        call_streak = 0       # consecutive CALL losses
+        put_streak = 0        # consecutive PUT losses
+        DIRECTION_BLOCK_AFTER = 3  # block a direction after this many losses
+        call_blocked = False
+        put_blocked = False
 
         while time.monotonic() < deadline:
             cycle = time.monotonic()
@@ -231,10 +248,26 @@ async def _run(args, token: str) -> None:
                     f"{ln.price_level:.4f}; it will not be traded again")
 
             pnl = day_pnl(TRADES_CSV, day)
+            if args.target_profit > 0 and pnl >= args.target_profit:
+                log(f"daily profit target reached ({pnl:+.2f} >= "
+                    f"{args.target_profit:+.2f}) - stopping for today")
+                break
             trend = trend_direction(candles_15m)
             d = decide(price, active, candles, int(time.time()), limits,
                        open_trades=open_trades, day_pnl=pnl, payout=payout,
-                       trend=trend)
+                       trend=trend, confirm=not args.no_confirm)
+
+            # Adaptive direction block: if CALLs or PUTs have lost N in a row,
+            # skip that direction. The market is telling us it's pushing one
+            # way and we should stop fighting it.
+            if d.tradeable and d.direction > 0 and call_blocked:
+                d = Decision(None, 0, f"{d.line.name} CALL skipped - "
+                            f"{call_streak} consecutive CALL losses, "
+                            f"direction blocked until a win resets it")
+            elif d.tradeable and d.direction < 0 and put_blocked:
+                d = Decision(None, 0, f"{d.line.name} PUT skipped - "
+                            f"{put_streak} consecutive PUT losses, "
+                            f"direction blocked until a win resets it")
 
             append(SIGNALS_CSV, {
                 "timestamp": now_utc().isoformat(), "symbol": args.symbol,
@@ -334,6 +367,35 @@ async def _run(args, token: str) -> None:
                                         f"${args.stake:.2f}")
                                 ladder_step = 0
                                 current_stake = args.stake
+                        # Adaptive direction learning: track consecutive
+                        # losses per direction. 3 in a row blocks that
+                        # direction until a win resets it.
+                        if ctype == "CALL":
+                            if profit < 0:
+                                call_streak += 1
+                                if call_streak >= DIRECTION_BLOCK_AFTER and not call_blocked:
+                                    call_blocked = True
+                                    log(f"   CALLs blocked - {call_streak} "
+                                        f"consecutive losses, market pushing down")
+                            elif profit > 0:
+                                if call_blocked:
+                                    log(f"   CALL win resets block (was "
+                                        f"{call_streak} losses)")
+                                call_streak = 0
+                                call_blocked = False
+                        elif ctype == "PUT":
+                            if profit < 0:
+                                put_streak += 1
+                                if put_streak >= DIRECTION_BLOCK_AFTER and not put_blocked:
+                                    put_blocked = True
+                                    log(f"   PUTs blocked - {put_streak} "
+                                        f"consecutive losses, market pushing up")
+                            elif profit > 0:
+                                if put_blocked:
+                                    log(f"   PUT win resets block (was "
+                                        f"{put_streak} losses)")
+                                put_streak = 0
+                                put_blocked = False
                     except Exception as exc:              # noqa: BLE001
                         open_trades = max(0, open_trades - 1)
                         log(f"   order failed ({type(exc).__name__}: {exc})")

@@ -278,9 +278,11 @@ def decide(price: float, lines: Sequence[Line], candles_1m: Sequence[dict[str, A
         if (ln.last_trade_epoch is not None
                 and now_epoch - ln.last_trade_epoch < limits.cooldown_seconds):
             continue
-        # Trend filter: only trade support bounces in an uptrend, resistance
-        # rejections in a downtrend. When trend is flat (0), allow both - the
-        # 1m confirmation is the only gate in that case.
+        # Trend filter: only trade support bounces in a clear uptrend,
+        # resistance rejections in a clear downtrend. When trend is flat (0),
+        # allow both directions - the 1m confirmation is the gate in that case.
+        # High-volume mode needs flat markets to trade; the trend filter still
+        # blocks the worst cases (CALL in downtrend, PUT in uptrend).
         if trend > 0 and not ln.wants_up:
             continue
         if trend < 0 and ln.wants_up:
