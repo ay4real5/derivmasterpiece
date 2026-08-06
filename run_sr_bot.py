@@ -107,6 +107,19 @@ def save_state(state: dict) -> None:
         pass
 
 
+def day_trades(path: str, day: str) -> list[dict]:
+    """Return today's settled trades newest-first for circuit-breakers."""
+    if not os.path.exists(path):
+        return []
+    rows = []
+    with open(path, newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            if not (row.get("timestamp") or "").startswith(day):
+                continue
+            rows.append(row)
+    return list(reversed(rows))
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--lines", default="lines.json")
@@ -201,8 +214,7 @@ async def _run(args, token: str) -> None:
         taken = 0
         fails = 0
         reconnect_fails = 0
-        ladder_step = 0
-        current_stake = args.stake
+        # ladder_step/current_stake loaded from persisted state below
         # Adaptive direction learning: track recent CALL/PUT results. If one
         # direction loses N times in a row, stop trading it until a win resets
         # the counter. This caught the pattern where PUTs at resistance lost
@@ -216,6 +228,11 @@ async def _run(args, token: str) -> None:
         put_streak = saved.get("put_streak", 0)
         call_blocked = saved.get("call_blocked", False)
         put_blocked = saved.get("put_blocked", False)
+        ladder_step = saved.get("ladder_step", 0)
+        current_stake = (
+            round(args.stake * args.martingale_mult ** ladder_step, 2)
+            if ladder_step else args.stake
+        )
         DIRECTION_BLOCK_AFTER = 2  # block a direction after this many losses
 
         while time.monotonic() < deadline:
@@ -405,21 +422,48 @@ async def _run(args, token: str) -> None:
                             "contract_id": cid,
                             "ladder_step": ladder_step,
                         })
-                        # Martingale ladder: on loss step up, on win reset.
+                        # Martingale ladder with circuit breakers.
+                        # Base math: at 92% payout, a win never fully recovers
+                        # all previous losses, but it gets close. The real danger
+                        # is a long streak during a bad run. We add:
+                        #   1) pause after 3 consecutive losses (don't escalate
+                        #      further until the next trade cycle)
+                        #   2) stop escalating if recent win rate < 50%
+                        #   3) hard cap at args.martingale_steps
                         if args.martingale_steps > 0:
+                            recent_trades = [t for t in day_trades(TRADES_CSV, day)]
+                            recent_wins = sum(1 for t in recent_trades if float(t["profit"]) > 0)
+                            recent_n = len(recent_trades)
+                            recent_wr = recent_wins / recent_n if recent_n else 1.0
+
                             if profit < 0:
-                                ladder_step += 1
-                                if ladder_step >= args.martingale_steps:
-                                    log(f"   ladder exhausted at step "
-                                        f"{ladder_step} - resetting to base "
-                                        f"${args.stake:.2f}")
+                                # Circuit breaker #1: after 3 straight losses,
+                                # pause escalation for this cycle.
+                                if ladder_step >= 2:
+                                    log(f"   martingale paused after 3 losses - "
+                                        f"will retry base ${args.stake:.2f} after cooldown")
+                                    ladder_step = 0
+                                    current_stake = args.stake
+                                # Circuit breaker #2: don't escalate if recent
+                                # win rate is under 50% (we're in a bad run).
+                                elif recent_wr < 0.5:
+                                    log(f"   recent WR {recent_wr:.0%} < 50% - "
+                                        f"no escalation, next stake ${args.stake:.2f}")
                                     ladder_step = 0
                                     current_stake = args.stake
                                 else:
-                                    current_stake = round(
-                                        args.stake * args.martingale_mult ** ladder_step, 2)
-                                    log(f"   loss -> ladder step {ladder_step+1}, "
-                                        f"next stake ${current_stake:.2f}")
+                                    ladder_step += 1
+                                    if ladder_step >= args.martingale_steps:
+                                        log(f"   ladder exhausted at step "
+                                            f"{ladder_step} - resetting to base "
+                                            f"${args.stake:.2f}")
+                                        ladder_step = 0
+                                        current_stake = args.stake
+                                    else:
+                                        current_stake = round(
+                                            args.stake * args.martingale_mult ** ladder_step, 2)
+                                        log(f"   loss -> ladder step {ladder_step+1}, "
+                                            f"next stake ${current_stake:.2f}")
                             elif profit > 0:
                                 if ladder_step > 0:
                                     log(f"   win recovered ladder (was step "
@@ -462,6 +506,7 @@ async def _run(args, token: str) -> None:
                             "put_streak": put_streak,
                             "call_blocked": call_blocked,
                             "put_blocked": put_blocked,
+                            "ladder_step": ladder_step,
                         })
                     except Exception as exc:              # noqa: BLE001
                         open_trades = max(0, open_trades - 1)
