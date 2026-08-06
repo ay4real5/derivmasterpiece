@@ -278,14 +278,13 @@ def decide(price: float, lines: Sequence[Line], candles_1m: Sequence[dict[str, A
         if (ln.last_trade_epoch is not None
                 and now_epoch - ln.last_trade_epoch < limits.cooldown_seconds):
             continue
-        # Trend filter: only trade support bounces in a clear uptrend,
-        # resistance rejections in a clear downtrend. When trend is flat (0),
-        # allow both directions - the 1m confirmation is the gate in that case.
-        # High-volume mode needs flat markets to trade; the trend filter still
-        # blocks the worst cases (CALL in downtrend, PUT in uptrend).
+        # Trend filter: REMOVED for CALL-only mode. The trend filter was
+        # blocking 100% of trades on R_25 because the 15m trend stayed DOWN
+        # while price sat at the range bottom - the best CALL setup. The
+        # falling-into-support momentum filter and adaptive 2-loss block
+        # are the protection now, not the trend filter.
+        # Only block PUTs in uptrend (we don't trade PUTs anyway in call mode).
         if trend > 0 and not ln.wants_up:
-            continue
-        if trend < 0 and ln.wants_up:
             continue
         if confirm and not confirmed(candles_1m, len(candles_1m) - 1, ln.wants_up):
             continue
@@ -306,8 +305,6 @@ def decide(price: float, lines: Sequence[Line], candles_1m: Sequence[dict[str, A
         why = f"{ln.name} in cooldown for another {left}s"
     elif trend > 0 and not ln.wants_up:
         why = f"at {ln.name} (resistance) but 15m trend is UP - no PUT against trend"
-    elif trend < 0 and ln.wants_up:
-        why = f"at {ln.name} (support) but 15m trend is DOWN - no CALL against trend"
     else:
         why = f"at {ln.name} but the 1m candles do not confirm"
     return Decision(None, 0, why)
