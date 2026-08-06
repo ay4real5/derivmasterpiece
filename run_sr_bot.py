@@ -304,6 +304,19 @@ async def _run(args, token: str) -> None:
                 d = Decision(None, 0, f"{d.line.name} CALL skipped - "
                             f"direction restricted to PUT only")
 
+            # Momentum filter: CALLs win when price is FALLING into support
+            # (genuine bounce), lose when RISING into the zone (already bounced,
+            # you're late). Data showed 100% win rate on falling-into-support
+            # vs 0% on rising-into-zone. This is the single most predictive
+            # pattern found in 23 CALL trades.
+            if d.tradeable and d.direction > 0 and len(candles) >= 3:
+                recent_closes = [float(c["close"]) for c in candles[-3:]]
+                rising = recent_closes[-1] > recent_closes[0]
+                if rising:
+                    d = Decision(None, 0, f"{d.line.name} CALL skipped - "
+                                f"price rising into support (not a genuine "
+                                f"bounce, momentum may exhaust)")
+
             # Adaptive direction block: if CALLs or PUTs have lost N in a row,
             # skip that direction. The market is telling us it's pushing one
             # way and we should stop fighting it.
