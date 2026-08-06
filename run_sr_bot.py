@@ -27,8 +27,8 @@ from dotenv import load_dotenv
 
 from deriv_bot.api import DerivAPI
 from pricebot.sr_lines import (
-    Limits, break_even, decide, load_lines, mark_broken, merge_state,
-    trend_direction,
+    Decision, Limits, break_even, decide, load_lines, mark_broken,
+    merge_state, trend_direction,
 )
 from tools import lockfile
 
