@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import json
 import os
 import sys
 import time
@@ -33,6 +34,7 @@ from tools import lockfile
 
 SIGNALS_CSV = "signals.csv"
 TRADES_CSV = "sr_trades.csv"
+STATE_FILE = "sr_bot_state.json"
 LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".sr_bot.lock")
 
 # Consecutive data failures before tearing the socket down and redialling, and
@@ -81,6 +83,30 @@ def day_pnl(path: str, day: str) -> float:
     return round(total, 2)
 
 
+def load_state() -> dict:
+    """Load adaptive learning state so it survives scheduled-task restarts.
+
+    Without this, every 30-minute restart wipes the CALL/PUT loss streaks and
+    the direction blocks. The bot would re-learn the same lesson (PUTs lose)
+    from scratch each time, losing $40 per lesson.
+    """
+    if not os.path.exists(STATE_FILE):
+        return {}
+    try:
+        with open(STATE_FILE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_state(state: dict) -> None:
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+    except OSError:
+        pass
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--lines", default="lines.json")
@@ -107,6 +133,13 @@ async def main() -> None:
                     help="skip 1m candle confirmation - trade as soon as "
                          "price is in the zone and trend allows. High-volume "
                          "mode; more trades but lower quality.")
+    ap.add_argument("--direction", choices=["both", "call", "put"],
+                    default="both",
+                    help="restrict trading to one direction. 'call' = only "
+                         "buy support bounces (RISE), 'put' = only sell "
+                         "resistance rejections (FALL). R_50 PUTs had 12% "
+                         "win rate across 8 trades - use 'call' to disable "
+                         "PUTs entirely.")
     args = ap.parse_args()
 
     load_dotenv(override=True)
@@ -175,11 +208,15 @@ async def _run(args, token: str) -> None:
         # the counter. This caught the pattern where PUTs at resistance lost
         # 4 in a row while CALLs at support won 4 in a row - price was pushing
         # up through resistance, so PUTs were throwing money away.
-        call_streak = 0       # consecutive CALL losses
-        put_streak = 0        # consecutive PUT losses
+        # State is persisted to sr_bot_state.json so it survives the 30-min
+        # scheduled-task restart. Without persistence, the bot re-learns the
+        # same lesson from scratch each restart, losing $40 per lesson.
+        saved = load_state()
+        call_streak = saved.get("call_streak", 0)
+        put_streak = saved.get("put_streak", 0)
+        call_blocked = saved.get("call_blocked", False)
+        put_blocked = saved.get("put_blocked", False)
         DIRECTION_BLOCK_AFTER = 2  # block a direction after this many losses
-        call_blocked = False
-        put_blocked = False
 
         while time.monotonic() < deadline:
             cycle = time.monotonic()
@@ -256,6 +293,16 @@ async def _run(args, token: str) -> None:
             d = decide(price, active, candles, int(time.time()), limits,
                        open_trades=open_trades, day_pnl=pnl, payout=payout,
                        trend=trend, confirm=not args.no_confirm)
+
+            # Direction restriction: --direction call blocks PUTs entirely,
+            # --direction put blocks CALLs. Based on data: R_50 PUTs had 12%
+            # win rate across 8 trades, so 'call' is the recommended mode.
+            if d.tradeable and args.direction == "call" and d.direction < 0:
+                d = Decision(None, 0, f"{d.line.name} PUT skipped - "
+                            f"direction restricted to CALL only")
+            elif d.tradeable and args.direction == "put" and d.direction > 0:
+                d = Decision(None, 0, f"{d.line.name} CALL skipped - "
+                            f"direction restricted to PUT only")
 
             # Adaptive direction block: if CALLs or PUTs have lost N in a row,
             # skip that direction. The market is telling us it's pushing one
@@ -396,6 +443,13 @@ async def _run(args, token: str) -> None:
                                         f"{put_streak} losses)")
                                 put_streak = 0
                                 put_blocked = False
+                        # Persist learning state so it survives restarts.
+                        save_state({
+                            "call_streak": call_streak,
+                            "put_streak": put_streak,
+                            "call_blocked": call_blocked,
+                            "put_blocked": put_blocked,
+                        })
                     except Exception as exc:              # noqa: BLE001
                         open_trades = max(0, open_trades - 1)
                         log(f"   order failed ({type(exc).__name__}: {exc})")
