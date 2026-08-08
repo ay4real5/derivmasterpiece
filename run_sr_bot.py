@@ -161,6 +161,11 @@ async def main() -> None:
                          "resistance rejections (FALL). R_50 PUTs had 12% "
                          "win rate across 8 trades - use 'call' to disable "
                          "PUTs entirely.")
+    ap.add_argument("--require-trend", action="store_true",
+                    help="only trade WITH the 15m trend: CALLs only in "
+                         "uptrend/flat, PUTs only in downtrend/flat. This "
+                         "enables the A/B test where account 2 trades both "
+                         "directions but only in the trend's direction.")
     ap.add_argument("--env-file", default=".env",
                     help="path to the env file that holds DERIV_API_TOKEN")
     ap.add_argument("--output-prefix", default="",
@@ -348,6 +353,17 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
             elif d.tradeable and args.direction == "put" and d.direction > 0:
                 d = Decision(None, 0, f"{d.line.name} CALL skipped - "
                             f"direction restricted to PUT only")
+
+            # --require-trend: only trade in the direction of the 15m trend.
+            # CALLs only in uptrend/flat; PUTs only in downtrend/flat.
+            # This is the A/B test for account 2.
+            if d.tradeable and args.require_trend:
+                if trend > 0 and d.direction < 0:
+                    d = Decision(None, 0, f"{d.line.name} PUT skipped - "
+                                f"--require-trend active, 15m trend is UP")
+                elif trend < 0 and d.direction > 0:
+                    d = Decision(None, 0, f"{d.line.name} CALL skipped - "
+                                f"--require-trend active, 15m trend is DOWN")
 
             # Momentum filter: CALLs win when price is FALLING into support
             # (genuine bounce), lose when RISING into the zone (already bounced,

@@ -278,12 +278,11 @@ def decide(price: float, lines: Sequence[Line], candles_1m: Sequence[dict[str, A
         if (ln.last_trade_epoch is not None
                 and now_epoch - ln.last_trade_epoch < limits.cooldown_seconds):
             continue
-        # Trend filter: REMOVED for CALL-only mode. The trend filter was
-        # blocking 100% of trades on R_25 because the 15m trend stayed DOWN
-        # while price sat at the range bottom - the best CALL setup. The
-        # falling-into-support momentum filter and adaptive 2-loss block
-        # are the protection now, not the trend filter.
-        # Only block PUTs in uptrend (we don't trade PUTs anyway in call mode).
+        # Trend filter: block PUTs in an uptrend. For CALLs at support we do
+        # NOT filter by trend here - account 1 trades them regardless, and
+        # account 2 applies an additional --require-trend filter in
+        # run_sr_bot.py. This lets the A/B test separate "CALL-only" from
+        # "both-directions trend-filtered" cleanly.
         if trend > 0 and not ln.wants_up:
             continue
         if confirm and not confirmed(candles_1m, len(candles_1m) - 1, ln.wants_up):
