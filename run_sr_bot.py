@@ -575,48 +575,31 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
                             "contract_id": cid,
                             "ladder_step": ladder_step,
                         })
-                        # Martingale ladder with circuit breakers.
-                        # Base math: at 92% payout, a win never fully recovers
-                        # all previous losses, but it gets close. The real danger
-                        # is a long streak during a bad run. We add:
-                        #   1) pause after 3 consecutive losses (don't escalate
-                        #      further until the next trade cycle)
-                        #   2) stop escalating if recent win rate < 50%
-                        #   3) hard cap at args.martingale_steps
+                        # Pure martingale ladder: escalate on every loss, reset
+                        # on every win, hard cap at args.martingale_steps. The
+                        # earlier circuit breakers (pause after 3 losses, no
+                        # escalation under 50% recent win rate) were removed
+                        # on request - they capped every ladder at ~3 steps
+                        # regardless of --martingale-steps, so a 7-step ladder
+                        # never actually reached step 4. args.max_daily_loss
+                        # is the real backstop now: it must be raised to cover
+                        # the full ladder (7 steps at $5 base / 2x = $635) or
+                        # the daily cap fires mid-ladder, which is worse than
+                        # either finishing the run or never starting it.
                         if args.martingale_steps > 0:
-                            recent_trades = [t for t in day_trades(trades_csv, day)]
-                            recent_wins = sum(1 for t in recent_trades if float(t["profit"]) > 0)
-                            recent_n = len(recent_trades)
-                            recent_wr = recent_wins / recent_n if recent_n else 1.0
-
                             if profit < 0:
-                                # Circuit breaker #1: after 3 straight losses,
-                                # pause escalation for this cycle.
-                                if ladder_step >= 2:
-                                    log(f"   martingale paused after 3 losses - "
-                                        f"will retry base ${args.stake:.2f} after cooldown")
-                                    ladder_step = 0
-                                    current_stake = args.stake
-                                # Circuit breaker #2: don't escalate if recent
-                                # win rate is under 50% (we're in a bad run).
-                                elif recent_wr < 0.5:
-                                    log(f"   recent WR {recent_wr:.0%} < 50% - "
-                                        f"no escalation, next stake ${args.stake:.2f}")
+                                ladder_step += 1
+                                if ladder_step >= args.martingale_steps:
+                                    log(f"   ladder exhausted at step "
+                                        f"{ladder_step} - resetting to base "
+                                        f"${args.stake:.2f}")
                                     ladder_step = 0
                                     current_stake = args.stake
                                 else:
-                                    ladder_step += 1
-                                    if ladder_step >= args.martingale_steps:
-                                        log(f"   ladder exhausted at step "
-                                            f"{ladder_step} - resetting to base "
-                                            f"${args.stake:.2f}")
-                                        ladder_step = 0
-                                        current_stake = args.stake
-                                    else:
-                                        current_stake = round(
-                                            args.stake * args.martingale_mult ** ladder_step, 2)
-                                        log(f"   loss -> ladder step {ladder_step+1}, "
-                                            f"next stake ${current_stake:.2f}")
+                                    current_stake = round(
+                                        args.stake * args.martingale_mult ** ladder_step, 2)
+                                    log(f"   loss -> ladder step {ladder_step+1}, "
+                                        f"next stake ${current_stake:.2f}")
                             elif profit > 0:
                                 if ladder_step > 0:
                                     log(f"   win recovered ladder (was step "
