@@ -523,6 +523,15 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
                         except Exception as exc:              # noqa: BLE001
                             log(f"   settlement stream failed "
                                 f"({type(exc).__name__}) - polling profit table")
+                            # BUG FOUND 2026-08-06: contract 8272208719 actually
+                            # won +4.62 (Deriv's own profit_table confirms it),
+                            # but this loop recorded it as a loss. Root cause:
+                            # the stream dies because the SOCKET is dead (half-
+                            # open, no close frame), and every retry below kept
+                            # querying that SAME dead socket - so every attempt
+                            # failed silently and the loop gave up having never
+                            # actually asked a live connection. Reconnecting
+                            # before each retry is the fix.
                             for _attempt in range(6):
                                 await asyncio.sleep(15)
                                 try:
@@ -537,8 +546,21 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
                                             break
                                     if profit is not None:
                                         break
-                                except Exception:              # noqa: BLE001
-                                    pass
+                                except Exception as exc2:      # noqa: BLE001
+                                    log(f"   profit_table poll failed "
+                                        f"({type(exc2).__name__}) - "
+                                        f"reconnecting before next attempt")
+                                    try:
+                                        await api.close()
+                                    except Exception:          # noqa: BLE001
+                                        pass
+                                    try:
+                                        url = await api.request_trading_ws_url(
+                                            token, acct["account_id"])
+                                        await api.connect(url)
+                                    except Exception as exc3:  # noqa: BLE001
+                                        log(f"   reconnect during settlement "
+                                            f"poll failed ({type(exc3).__name__})")
                         if profit is None:
                             log(f"   could not settle {cid} - assuming loss, "
                                 f"ladder steps up as precaution")
