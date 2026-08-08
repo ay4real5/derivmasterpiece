@@ -26,9 +26,10 @@ import yaml
 from dotenv import load_dotenv
 
 from deriv_bot.api import DerivAPI
+from pricebot.scan import scan_levels
 from pricebot.sr_lines import (
     Decision, Limits, break_even, decide, load_lines, mark_broken,
-    merge_state, trend_direction,
+    merge_state, retire_losing_lines, trend_direction,
 )
 from tools import lockfile
 
@@ -166,6 +167,28 @@ async def main() -> None:
                          "uptrend/flat, PUTs only in downtrend/flat. This "
                          "enables the A/B test where account 2 trades both "
                          "directions but only in the trend's direction.")
+    ap.add_argument("--require-wick", action="store_true",
+                    help="require the last completed candle to show a real "
+                         "rejection wick at the level (touched the zone, "
+                         "closed back in the trade's favor), not just close "
+                         "the right direction. Stricter than --no-confirm's "
+                         "gate, catches the 'grazed the level and kept "
+                         "going' false signals confirmed() alone lets through.")
+    ap.add_argument("--adaptive-tolerance", action="store_true",
+                    help="widen each line's zone to match recent realised "
+                         "volatility instead of the fixed tolerance_pct in "
+                         "lines.json. Computed from the last 20 1m candles' "
+                         "average true range; never shrinks below the "
+                         "file's own tolerance_pct.")
+    ap.add_argument("--retire-after-losses", type=int, default=0,
+                    help="retire a level after its own net losses (losses "
+                         "minus wins) reach this many, even if price never "
+                         "closed through it. 0 disables this check.")
+    ap.add_argument("--rescan-minutes", type=float, default=0.0,
+                    help="if price has not been inside any active line's "
+                         "zone for this many minutes, rescan swing highs/"
+                         "lows near the current price and overwrite "
+                         "lines.json with fresh levels. 0 disables rescans.")
     ap.add_argument("--env-file", default=".env",
                     help="path to the env file that holds DERIV_API_TOKEN")
     ap.add_argument("--output-prefix", default="",
@@ -268,6 +291,18 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
         )
         DIRECTION_BLOCK_AFTER = 2  # block a direction after this many losses
 
+        # Per-level win/loss track record, restored by name so a level that
+        # was already losing before a restart does not get a clean slate.
+        line_stats = saved.get("line_stats", {})
+        for ln in lines:
+            rec = line_stats.get(ln.name)
+            if rec:
+                ln.wins, ln.losses = rec.get("wins", 0), rec.get("losses", 0)
+
+        # Rescan bookkeeping: how long has price been outside every active
+        # line's zone? Reset the clock whenever price is inside one.
+        outside_zone_since: float | None = None
+
         while time.monotonic() < deadline:
             cycle = time.monotonic()
             day = now_utc().strftime("%Y-%m-%d")
@@ -334,6 +369,57 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
                 log(f"LINE BROKEN: {ln.name} - price {price:.4f} closed through "
                     f"{ln.price_level:.4f}; it will not be traded again")
 
+            for ln in retire_losing_lines(active, args.retire_after_losses):
+                log(f"LINE RETIRED: {ln.name} - {ln.losses}L/{ln.wins}W net "
+                    f"record, retiring regardless of price structure")
+
+            if args.adaptive_tolerance and len(candles) >= 5:
+                # Average true range over the last few 1m candles, as a % of
+                # price. A fixed tolerance_pct drawn when the market was calm
+                # is too tight once it gets choppy, and too loose once it goes
+                # quiet - this tracks what "close to the level" actually means
+                # right now. Never shrinks a line below its file value.
+                trs = []
+                prev_close = float(candles[0]["close"])
+                for c in candles[1:]:
+                    high, low = float(c["high"]), float(c["low"])
+                    trs.append(max(high - low, abs(high - prev_close),
+                                  abs(low - prev_close)))
+                    prev_close = float(c["close"])
+                atr_pct = (sum(trs) / len(trs)) / price * 100 if trs else 0.0
+                for ln in active:
+                    ln.tolerance_pct = max(ln.tolerance_pct, atr_pct * 1.5)
+
+            # Rescan tracking: has price left every active line's zone for
+            # too long? A level drawn when price sat elsewhere just burns
+            # cycles once price has moved on.
+            in_any_zone = any(ln.contains(price) for ln in active if not ln.broken)
+            if in_any_zone:
+                outside_zone_since = None
+            elif outside_zone_since is None:
+                outside_zone_since = cycle
+            elif (args.rescan_minutes > 0
+                  and cycle - outside_zone_since >= args.rescan_minutes * 60):
+                log(f"price {price:.4f} has been outside every zone for "
+                    f"{args.rescan_minutes:.1f}+ min - rescanning {args.symbol}")
+                try:
+                    fresh = await scan_levels(api, args.symbol)
+                    if fresh:
+                        with open(args.lines, "w", encoding="utf-8") as fh:
+                            json.dump(fresh, fh, indent=2)
+                        lines = load_lines(args.lines)
+                        active = [ln for ln in lines if ln.active]
+                        for ln in active:
+                            ln.first_seen_epoch = int(time.time())
+                        log(f"RESCAN: wrote {len(fresh)} fresh level(s) to "
+                            f"{args.lines}")
+                    else:
+                        log("RESCAN: no levels found, keeping the old set")
+                except Exception as exc:                      # noqa: BLE001
+                    log(f"RESCAN failed ({type(exc).__name__}: {exc}), "
+                        f"keeping the old set")
+                outside_zone_since = None
+
             pnl = day_pnl(trades_csv, day)
             if args.target_profit > 0 and pnl >= args.target_profit:
                 log(f"daily profit target reached ({pnl:+.2f} >= "
@@ -342,7 +428,8 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
             trend = trend_direction(candles_15m)
             d = decide(price, active, candles, int(time.time()), limits,
                        open_trades=open_trades, day_pnl=pnl, payout=payout,
-                       trend=trend, confirm=not args.no_confirm)
+                       trend=trend, confirm=not args.no_confirm,
+                       require_wick=args.require_wick)
 
             # Direction restriction: --direction call blocks PUTs entirely,
             # --direction put blocks CALLs. Based on data: R_50 PUTs had 12%
@@ -544,6 +631,14 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
                                         f"{put_streak} losses)")
                                 put_streak = 0
                                 put_blocked = False
+                        # Per-level track record, for retire_losing_lines.
+                        if profit > 0:
+                            d.line.wins += 1
+                        else:
+                            d.line.losses += 1
+                        line_stats[d.line.name] = {
+                            "wins": d.line.wins, "losses": d.line.losses,
+                        }
                         # Persist learning state so it survives restarts.
                         save_state(state_file, {
                             "call_streak": call_streak,
@@ -551,6 +646,7 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
                             "call_blocked": call_blocked,
                             "put_blocked": put_blocked,
                             "ladder_step": ladder_step,
+                            "line_stats": line_stats,
                         })
                     except Exception as exc:              # noqa: BLE001
                         open_trades = max(0, open_trades - 1)

@@ -55,6 +55,12 @@ class Line:
     last_trade_epoch: int | None = None
     broken: bool = False
     first_seen_epoch: int | None = None
+    # Per-level track record, persisted across restarts via sr_bot_state.json
+    # (see run_sr_bot.py's line_stats). Used to retire a level that keeps
+    # losing even though price never technically closed through it - a level
+    # can be "still there" on the chart and still be a bad bet.
+    wins: int = 0
+    losses: int = 0
 
     @property
     def wants_up(self) -> bool:
@@ -150,8 +156,33 @@ def merge_state(old: Sequence[Line], new: Sequence[Line]) -> list[Line]:
             ln.last_trade_epoch = prev.last_trade_epoch
             ln.broken = prev.broken
             ln.first_seen_epoch = prev.first_seen_epoch
+            ln.wins = prev.wins
+            ln.losses = prev.losses
         out.append(ln)
     return out
+
+
+def retire_losing_lines(lines: Sequence[Line], max_net_losses: int = 2) -> list[Line]:
+    """Retire a level whose own track record is bad, even if price never
+    closed through it.
+
+    `mark_broken` only reacts to price structure - a level can sit there
+    losing trade after trade while price keeps bouncing just enough to stay
+    inside the zone. This is the faster kill switch: once a specific level's
+    losses minus wins reaches `max_net_losses`, stop trading it. A single win
+    does not erase the count - the level has to be net profitable again to
+    escape retirement, which is deliberately stricter than the win itself.
+    """
+    if max_net_losses <= 0:
+        return []
+    hit = []
+    for ln in lines:
+        if ln.broken or not ln.active:
+            continue
+        if (ln.losses - ln.wins) >= max_net_losses:
+            ln.broken = True
+            hit.append(ln)
+    return hit
 
 
 def mark_broken(lines: Sequence[Line], price: float) -> list[Line]:
@@ -237,7 +268,7 @@ def decide(price: float, lines: Sequence[Line], candles_1m: Sequence[dict[str, A
            now_epoch: int, limits: Limits, *, open_trades: int = 0,
            day_pnl: float = 0.0, payout: float = DEFAULT_PAYOUT,
            confirm: bool = True,
-           trend: int = 0) -> Decision:
+           trend: int = 0, require_wick: bool = False) -> Decision:
     """The whole entry rule set, in the proposal's own order.
 
     Returns a Decision every time. A skip is never silent, because "no trade"
@@ -249,8 +280,14 @@ def decide(price: float, lines: Sequence[Line], candles_1m: Sequence[dict[str, A
     direction: CALL (support bounce) only if trend is up, PUT (resistance
     rejection) only if trend is down. This filters out the majority of losses
     seen in live testing - support bought while the 15m was falling through it.
+
+    `require_wick` adds a second, independent confirmation: the last completed
+    candle must show an actual rejection wick at the level, not just close the
+    right direction. A candle that grazes the zone and keeps going is not the
+    same signal as one that pierces it and snaps back - `confirmed()` alone
+    cannot tell those apart because it only reads open/close.
     """
-    from .sr_backtest import confirmed          # one confirmation implementation
+    from .sr_backtest import confirmed, wick_rejection  # one confirmation implementation
 
     if day_pnl <= -abs(limits.max_daily_loss):
         return Decision(None, 0, f"daily loss limit reached ({day_pnl:+.2f})")
@@ -287,6 +324,10 @@ def decide(price: float, lines: Sequence[Line], candles_1m: Sequence[dict[str, A
             continue
         if confirm and not confirmed(candles_1m, len(candles_1m) - 1, ln.wants_up):
             continue
+        if require_wick and not wick_rejection(
+                candles_1m, len(candles_1m) - 1, ln.wants_up,
+                ln.price_level, ln.tolerance_abs()):
+            continue
         trend_label = f", 15m trend {'UP' if trend > 0 else 'DOWN' if trend < 0 else 'FLAT'}"
         return Decision(ln, 1 if ln.wants_up else -1,
                         f"{ln.name} ({ln.type}) at {ln.price_level:.4f}, price "
@@ -304,6 +345,10 @@ def decide(price: float, lines: Sequence[Line], candles_1m: Sequence[dict[str, A
         why = f"{ln.name} in cooldown for another {left}s"
     elif trend > 0 and not ln.wants_up:
         why = f"at {ln.name} (resistance) but 15m trend is UP - no PUT against trend"
+    elif require_wick and not wick_rejection(
+            candles_1m, len(candles_1m) - 1, ln.wants_up,
+            ln.price_level, ln.tolerance_abs()):
+        why = f"at {ln.name} but the last candle shows no rejection wick"
     else:
         why = f"at {ln.name} but the 1m candles do not confirm"
     return Decision(None, 0, why)

@@ -133,6 +133,40 @@ def confirmed(candles_1m: Sequence[dict[str, Any]], i: int, want_up: bool,
     return agree >= need
 
 
+def wick_rejection(candles_1m: Sequence[dict[str, Any]], i: int, want_up: bool,
+                   level_price: float, tolerance_abs: float,
+                   wick_ratio: float = 0.5) -> bool:
+    """Did the last completed candle actually get REJECTED at the level,
+    rather than just grazing it and closing the right direction?
+
+    `confirmed()` only reads open vs close - a candle that ticks up 0.001%
+    with its whole range below the level passes it. This checks the wick: for
+    a support bounce (want_up), price must have poked at or below the level
+    (low within tolerance of it) and then closed back up in the top half of
+    the candle's own range - the actual "someone bought this dip" signature.
+    For a resistance rejection, the mirror: high pokes at or above the level,
+    close lands in the bottom half.
+
+    A doji or a candle that never reached the level at all fails this, on
+    purpose - if the wick didn't touch the zone there was nothing to reject.
+    """
+    if i < 0 or i >= len(candles_1m):
+        return False
+    c = candles_1m[i]
+    o, close = _f(c, "open"), _f(c, "close")
+    high, low = _f(c, "high"), _f(c, "low")
+    rng = high - low
+    if rng <= 0:
+        return False
+    if want_up:
+        touched = low <= level_price + tolerance_abs
+        closed_upper_half = (close - low) / rng >= wick_ratio
+        return touched and closed_upper_half and close > o
+    touched = high >= level_price - tolerance_abs
+    closed_lower_half = (high - close) / rng >= wick_ratio
+    return touched and closed_lower_half and close < o
+
+
 def annotate_breaks(levels: list[dict[str, Any]],
                     htf_candles: Sequence[dict[str, Any]],
                     tolerance_pct: float) -> None:
