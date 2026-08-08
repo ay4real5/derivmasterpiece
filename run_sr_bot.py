@@ -37,6 +37,14 @@ TRADES_CSV = "sr_trades.csv"
 STATE_FILE = "sr_bot_state.json"
 LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".sr_bot.lock")
 
+
+def prefixed(prefix: str | None, name: str) -> str:
+    """Return `name` unchanged when prefix is empty/None, else `prefix_name`."""
+    if not prefix:
+        return name
+    return f"{prefix}_{name}"
+
+
 # Consecutive data failures before tearing the socket down and redialling, and
 # how many redials before admitting the problem is not the market.
 MAX_FAILS = 3
@@ -83,25 +91,25 @@ def day_pnl(path: str, day: str) -> float:
     return round(total, 2)
 
 
-def load_state() -> dict:
+def load_state(state_file: str) -> dict:
     """Load adaptive learning state so it survives scheduled-task restarts.
 
     Without this, every 30-minute restart wipes the CALL/PUT loss streaks and
     the direction blocks. The bot would re-learn the same lesson (PUTs lose)
     from scratch each time, losing $40 per lesson.
     """
-    if not os.path.exists(STATE_FILE):
+    if not os.path.exists(state_file):
         return {}
     try:
-        with open(STATE_FILE, encoding="utf-8") as fh:
+        with open(state_file, encoding="utf-8") as fh:
             return json.load(fh)
     except (json.JSONDecodeError, OSError):
         return {}
 
 
-def save_state(state: dict) -> None:
+def save_state(state_file: str, state: dict) -> None:
     try:
-        with open(STATE_FILE, "w", encoding="utf-8") as fh:
+        with open(state_file, "w", encoding="utf-8") as fh:
             json.dump(state, fh)
     except OSError:
         pass
@@ -153,28 +161,48 @@ async def main() -> None:
                          "resistance rejections (FALL). R_50 PUTs had 12% "
                          "win rate across 8 trades - use 'call' to disable "
                          "PUTs entirely.")
+    ap.add_argument("--env-file", default=".env",
+                    help="path to the env file that holds DERIV_API_TOKEN")
+    ap.add_argument("--output-prefix", default="",
+                    help="prefix for signals, trades, state, lock, and log files. "
+                         "Use one prefix per account when running multiple "
+                         "instances concurrently.")
+    ap.add_argument("--app-id", default=None,
+                    help="override config.yaml app_id (useful for a second "
+                         "Deriv account with its own OAuth app)")
     args = ap.parse_args()
 
-    load_dotenv(override=True)
+    load_dotenv(dotenv_path=args.env_file, override=True)
     token = os.environ.get("DERIV_API_TOKEN")
     if not token:
-        sys.exit("Set DERIV_API_TOKEN in .env first.")
+        sys.exit(f"Set DERIV_API_TOKEN in {args.env_file} first.")
     if os.environ.get("DEMO_MODE", "true").strip().lower() == "false":
         sys.exit("This bot is demo-only. Unset DEMO_MODE=false to run it.")
 
-    if not lockfile.acquire(LOCK_PATH):
-        sys.exit("another run_sr_bot.py already holds the lock - exiting "
-                 "rather than doubling the trade rate against the same "
-                 "lines.json and the same daily-loss cap")
+    # Per-account output paths. Default (empty prefix) keeps current filenames;
+    # anything else gives separate files so two accounts can run side-by-side.
+    signals_csv = prefixed(args.output_prefix, SIGNALS_CSV)
+    trades_csv = prefixed(args.output_prefix, TRADES_CSV)
+    state_file = prefixed(args.output_prefix, STATE_FILE)
+    lock_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        prefixed(args.output_prefix, ".sr_bot.lock"),
+    )
+
+    if not lockfile.acquire(lock_path):
+        sys.exit(f"another run_sr_bot.py already holds the lock ({lock_path}) - "
+                 f"exiting rather than doubling the trade rate")
 
     try:
-        await _run(args, token)
+        await _run(args, token, signals_csv, trades_csv, state_file)
     finally:
-        lockfile.release(LOCK_PATH)
+        lockfile.release(lock_path)
 
 
-async def _run(args, token: str) -> None:
+async def _run(args, token: str, signals_csv: str, trades_csv: str,
+               state_file: str) -> None:
     cfg = yaml.safe_load(open("config.yaml", encoding="utf-8"))
+    app_id = args.app_id if args.app_id else cfg["app_id"]
     limits = Limits(stake=args.stake, max_daily_loss=args.max_daily_loss,
                     cooldown_seconds=args.cooldown,
                     max_trades_per_line_per_day=args.max_per_line)
@@ -188,7 +216,7 @@ async def _run(args, token: str) -> None:
         sys.exit(f"No active lines in {args.lines}. Add your levels and set "
                  f"active:true - the bot has nothing to watch otherwise.")
 
-    api = DerivAPI(cfg["app_id"])
+    api = DerivAPI(app_id)
     acct = next(a for a in await api.list_accounts(token)
                 if a.get("account_type") == "demo")
     await api.connect(await api.request_trading_ws_url(token, acct["account_id"]))
@@ -223,7 +251,7 @@ async def _run(args, token: str) -> None:
         # State is persisted to sr_bot_state.json so it survives the 30-min
         # scheduled-task restart. Without persistence, the bot re-learns the
         # same lesson from scratch each restart, losing $40 per lesson.
-        saved = load_state()
+        saved = load_state(state_file)
         call_streak = saved.get("call_streak", 0)
         put_streak = saved.get("put_streak", 0)
         call_blocked = saved.get("call_blocked", False)
@@ -301,7 +329,7 @@ async def _run(args, token: str) -> None:
                 log(f"LINE BROKEN: {ln.name} - price {price:.4f} closed through "
                     f"{ln.price_level:.4f}; it will not be traded again")
 
-            pnl = day_pnl(TRADES_CSV, day)
+            pnl = day_pnl(trades_csv, day)
             if args.target_profit > 0 and pnl >= args.target_profit:
                 log(f"daily profit target reached ({pnl:+.2f} >= "
                     f"{args.target_profit:+.2f}) - stopping for today")
@@ -346,7 +374,7 @@ async def _run(args, token: str) -> None:
                             f"{put_streak} consecutive PUT losses, "
                             f"direction blocked until a win resets it")
 
-            append(SIGNALS_CSV, {
+            append(signals_csv, {
                 "timestamp": now_utc().isoformat(), "symbol": args.symbol,
                 "price": f"{price:.4f}", "payout": f"{payout:.4f}",
                 "taken": int(d.tradeable),
@@ -414,7 +442,7 @@ async def _run(args, token: str) -> None:
                             profit = -current_stake
                         open_trades -= 1
                         log(f"   SETTLED {profit:+.2f}")
-                        append(TRADES_CSV, {
+                        append(trades_csv, {
                             "timestamp": now_utc().isoformat(),
                             "symbol": args.symbol, "line": d.line.name,
                             "type": ctype, "stake": f"{current_stake:.2f}",
@@ -431,7 +459,7 @@ async def _run(args, token: str) -> None:
                         #   2) stop escalating if recent win rate < 50%
                         #   3) hard cap at args.martingale_steps
                         if args.martingale_steps > 0:
-                            recent_trades = [t for t in day_trades(TRADES_CSV, day)]
+                            recent_trades = [t for t in day_trades(trades_csv, day)]
                             recent_wins = sum(1 for t in recent_trades if float(t["profit"]) > 0)
                             recent_n = len(recent_trades)
                             recent_wr = recent_wins / recent_n if recent_n else 1.0
@@ -501,7 +529,7 @@ async def _run(args, token: str) -> None:
                                 put_streak = 0
                                 put_blocked = False
                         # Persist learning state so it survives restarts.
-                        save_state({
+                        save_state(state_file, {
                             "call_streak": call_streak,
                             "put_streak": put_streak,
                             "call_blocked": call_blocked,
@@ -516,9 +544,9 @@ async def _run(args, token: str) -> None:
             if elapsed < args.poll:
                 await asyncio.sleep(args.poll - elapsed)
 
-        pnl = day_pnl(TRADES_CSV, now_utc().strftime("%Y-%m-%d"))
+        pnl = day_pnl(trades_csv, now_utc().strftime("%Y-%m-%d"))
         log(f"session over: {taken} trade(s) taken, day PnL {pnl:+.2f}")
-        log(f"every decision is in {SIGNALS_CSV}; trades in {TRADES_CSV}")
+        log(f"every decision is in {signals_csv}; trades in {trades_csv}")
     finally:
         await api.close()
 
