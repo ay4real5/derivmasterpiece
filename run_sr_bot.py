@@ -452,18 +452,16 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
                     d = Decision(None, 0, f"{d.line.name} CALL skipped - "
                                 f"--require-trend active, 15m trend is DOWN")
 
-            # Momentum filter: CALLs win when price is FALLING into support
-            # (genuine bounce), lose when RISING into the zone (already bounced,
-            # you're late). Data showed 100% win rate on falling-into-support
-            # vs 0% on rising-into-zone. This is the single most predictive
-            # pattern found in 23 CALL trades.
-            if d.tradeable and d.direction > 0 and len(candles) >= 3:
-                recent_closes = [float(c["close"]) for c in candles[-3:]]
-                rising = recent_closes[-1] > recent_closes[0]
-                if rising:
-                    d = Decision(None, 0, f"{d.line.name} CALL skipped - "
-                                f"price rising into support (not a genuine "
-                                f"bounce, momentum may exhaust)")
+            # Momentum filter REMOVED 2026-08-08: it required the last 3
+            # candle closes to be falling into support, but a genuine
+            # wick-rejection candle (see --require-wick / wick_rejection())
+            # closes UP by definition - that's what "rejected the level"
+            # means. Stacking both meant the momentum filter blocked the
+            # exact candle wick_rejection was designed to catch: 249
+            # near-support touches today, wick-rejection or momentum failed
+            # on every single one, zero trades taken. wick_rejection() is the
+            # more precise, single-candle signal; this blunter 3-candle
+            # check was fighting it, not reinforcing it.
 
             # Adaptive direction block: if CALLs or PUTs have lost N in a row,
             # skip that direction. The market is telling us it's pushing one
