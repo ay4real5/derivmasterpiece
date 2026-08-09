@@ -271,25 +271,17 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
         fails = 0
         reconnect_fails = 0
         # ladder_step/current_stake loaded from persisted state below
-        # Adaptive direction learning: track recent CALL/PUT results. If one
-        # direction loses N times in a row, stop trading it until a win resets
-        # the counter. This caught the pattern where PUTs at resistance lost
-        # 4 in a row while CALLs at support won 4 in a row - price was pushing
-        # up through resistance, so PUTs were throwing money away.
         # State is persisted to sr_bot_state.json so it survives the 30-min
-        # scheduled-task restart. Without persistence, the bot re-learns the
-        # same lesson from scratch each restart, losing $40 per lesson.
+        # scheduled-task restart. call_streak/put_streak are diagnostics only
+        # now (see the removal note further down for why the block was cut).
         saved = load_state(state_file)
         call_streak = saved.get("call_streak", 0)
         put_streak = saved.get("put_streak", 0)
-        call_blocked = saved.get("call_blocked", False)
-        put_blocked = saved.get("put_blocked", False)
         ladder_step = saved.get("ladder_step", 0)
         current_stake = (
             round(args.stake * args.martingale_mult ** ladder_step, 2)
             if ladder_step else args.stake
         )
-        DIRECTION_BLOCK_AFTER = 2  # block a direction after this many losses
 
         # Per-level win/loss track record, restored by name so a level that
         # was already losing before a restart does not get a clean slate.
@@ -463,17 +455,15 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
             # more precise, single-candle signal; this blunter 3-candle
             # check was fighting it, not reinforcing it.
 
-            # Adaptive direction block: if CALLs or PUTs have lost N in a row,
-            # skip that direction. The market is telling us it's pushing one
-            # way and we should stop fighting it.
-            if d.tradeable and d.direction > 0 and call_blocked:
-                d = Decision(None, 0, f"{d.line.name} CALL skipped - "
-                            f"{call_streak} consecutive CALL losses, "
-                            f"direction blocked until a win resets it")
-            elif d.tradeable and d.direction < 0 and put_blocked:
-                d = Decision(None, 0, f"{d.line.name} PUT skipped - "
-                            f"{put_streak} consecutive PUT losses, "
-                            f"direction blocked until a win resets it")
+            # Adaptive direction block REMOVED 2026-08-09: it could only be
+            # reset by a win in the blocked direction, but once blocked, that
+            # direction never traded again - so it could never win, so it
+            # never unblocked. A permanent deadlock: account 1 (CALL-only)
+            # got stuck at 13:23 and never traded again except right after a
+            # restart cleared the state. It also directly fought the 7-step
+            # martingale ladder, freezing a direction after 2 losses before
+            # the ladder even reached step 3. call_streak/put_streak are
+            # still tracked below purely for diagnostics in sr_bot_state.json.
 
             append(signals_csv, {
                 "timestamp": now_utc().isoformat(), "symbol": args.symbol,
@@ -605,35 +595,18 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
                                         f"${args.stake:.2f}")
                                 ladder_step = 0
                                 current_stake = args.stake
-                        # Adaptive direction learning: track consecutive
-                        # losses per direction. 3 in a row blocks that
-                        # direction until a win resets it.
+                        # Streak tracking kept for diagnostics only - no
+                        # longer blocks trading (see removal note above).
                         if ctype == "CALL":
                             if profit < 0:
                                 call_streak += 1
-                                if call_streak >= DIRECTION_BLOCK_AFTER and not call_blocked:
-                                    call_blocked = True
-                                    log(f"   CALLs blocked - {call_streak} "
-                                        f"consecutive losses, market pushing down")
                             elif profit > 0:
-                                if call_blocked:
-                                    log(f"   CALL win resets block (was "
-                                        f"{call_streak} losses)")
                                 call_streak = 0
-                                call_blocked = False
                         elif ctype == "PUT":
                             if profit < 0:
                                 put_streak += 1
-                                if put_streak >= DIRECTION_BLOCK_AFTER and not put_blocked:
-                                    put_blocked = True
-                                    log(f"   PUTs blocked - {put_streak} "
-                                        f"consecutive losses, market pushing up")
                             elif profit > 0:
-                                if put_blocked:
-                                    log(f"   PUT win resets block (was "
-                                        f"{put_streak} losses)")
                                 put_streak = 0
-                                put_blocked = False
                         # Per-level track record, for retire_losing_lines.
                         if profit > 0:
                             d.line.wins += 1
@@ -646,8 +619,6 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
                         save_state(state_file, {
                             "call_streak": call_streak,
                             "put_streak": put_streak,
-                            "call_blocked": call_blocked,
-                            "put_blocked": put_blocked,
                             "ladder_step": ladder_step,
                             "line_stats": line_stats,
                         })

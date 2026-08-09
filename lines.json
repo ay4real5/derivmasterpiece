@@ -2,72 +2,81 @@
   {
     "name": "S1",
     "symbol": "R_50",
-    "price_level": 105.2275,
-    "type": "support",
-    "timeframe": "10m",
-    "tolerance_pct": 0.35,
-    "active": true
-  },
-  {
-    "name": "S2",
-    "symbol": "R_50",
-    "price_level": 104.7537,
-    "type": "support",
-    "timeframe": "5m",
-    "tolerance_pct": 0.35,
-    "active": true
-  },
-  {
-    "name": "S3",
-    "symbol": "R_50",
-    "price_level": 104.532,
+    "price_level": 100.2142,
     "type": "support",
     "timeframe": "3m",
     "tolerance_pct": 0.35,
     "active": true
   },
   {
-    "name": "S4",
+    "name": "S2",
     "symbol": "R_50",
-    "price_level": 104.5189,
+    "price_level": 100.1915,
     "type": "support",
     "timeframe": "10m",
     "tolerance_pct": 0.35,
     "active": true
   },
   {
-    "name": "S5",
+    "name": "S3",
     "symbol": "R_50",
-    "price_level": 104.3797,
+    "price_level": 99.8363,
     "type": "support",
-    "timeframe": "1m",
-    "tolerance_pct": 0.35,
-    "active": true
-  },
-  {
-    "name": "S6",
-    "symbol": "R_50",
-    "price_level": 104.0278,
-    "type": "support",
-    "timeframe": "10m",
+    "timeframe": "5m",
     "tolerance_pct": 0.35,
     "active": true
   },
   {
     "name": "R1",
     "symbol": "R_50",
-    "price_level": 105.6267,
+    "price_level": 101.1051,
     "type": "resistance",
-    "timeframe": "10m",
+    "timeframe": "5m",
     "tolerance_pct": 0.35,
     "active": true
   },
   {
     "name": "R2",
     "symbol": "R_50",
-    "price_level": 106.1416,
+    "price_level": 101.114,
     "type": "resistance",
     "timeframe": "10m",
+    "tolerance_pct": 0.35,
+    "active": true
+  },
+  {
+    "name": "R3",
+    "symbol": "R_50",
+    "price_level": 101.2074,
+    "type": "resistance",
+    "timeframe": "1m",
+    "tolerance_pct": 0.35,
+    "active": true
+  },
+  {
+    "name": "R4",
+    "symbol": "R_50",
+    "price_level": 101.4975,
+    "type": "resistance",
+    "timeframe": "3m",
+    "tolerance_pct": 0.35,
+    "active": true
+  },
+  {
+    "name": "R5",
+    "symbol": "R_50",
+    "price_level": 102.3647,
+    "type": "resistance",
+    "timeframe": "10m",
+    "tolerance_pct": 0.35,
+    "active": true
+  },
+  {
+    "name": "R6",
+    "symbol": "R_50",
+    "price_level": 102.7255,
+    "type": "resistance",
+    "timeframe": "3m",
     "tolerance_pct": 0.35,
     "active": true
   }
