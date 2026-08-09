@@ -145,10 +145,21 @@ async def main() -> None:
     ap.add_argument("--max-per-line", type=int, default=3)
     ap.add_argument("--martingale-steps", type=int, default=6,
                     help="max consecutive losing trades before resetting "
-                         "stake to base (0 = flat, no ladder)")
+                         "stake to base (0 = flat, no ladder). Ignored if "
+                         "--stake-ladder is given - the ladder's own length "
+                         "is used instead.")
     ap.add_argument("--martingale-mult", type=float, default=2.0,
                     help="stake multiplier after each loss (2.0 = classic "
-                         "double-up)")
+                         "double-up). Ignored if --stake-ladder is given.")
+    ap.add_argument("--stake-ladder", default="",
+                    help="comma-separated explicit stakes to use instead of "
+                         "a geometric martingale, e.g. "
+                         "'5,11.14,13.46,20.75,31.98,49.28,75.9,117.05,"
+                         "180.39,278.00,428.43'. Step 0 is the first bet "
+                         "after any win/reset; each loss advances one step; "
+                         "exhausting the list resets to step 0. When given, "
+                         "this replaces --stake, --martingale-steps and "
+                         "--martingale-mult entirely.")
     ap.add_argument("--dry-run", action="store_true",
                     help="decide and log, never place an order")
     ap.add_argument("--no-confirm", action="store_true",
@@ -200,6 +211,18 @@ async def main() -> None:
                          "Deriv account with its own OAuth app)")
     args = ap.parse_args()
 
+    stake_ladder: list[float] | None = None
+    if args.stake_ladder.strip():
+        try:
+            stake_ladder = [float(x) for x in args.stake_ladder.split(",") if x.strip()]
+        except ValueError:
+            sys.exit(f"--stake-ladder must be comma-separated numbers, "
+                     f"got {args.stake_ladder!r}")
+        if not stake_ladder:
+            sys.exit("--stake-ladder was given but parsed to an empty list")
+        args.stake = stake_ladder[0]
+        args.martingale_steps = len(stake_ladder)
+
     load_dotenv(dotenv_path=args.env_file, override=True)
     token = os.environ.get("DERIV_API_TOKEN")
     if not token:
@@ -222,13 +245,24 @@ async def main() -> None:
                  f"exiting rather than doubling the trade rate")
 
     try:
-        await _run(args, token, signals_csv, trades_csv, state_file)
+        await _run(args, token, signals_csv, trades_csv, state_file, stake_ladder)
     finally:
         lockfile.release(lock_path)
 
 
+def stake_for_step(args, stake_ladder: list[float] | None, step: int) -> float:
+    """The stake for a given ladder step, whichever mode is active.
+
+    With --stake-ladder, step is a plain index into the explicit list. Without
+    it, this is the original geometric martingale: base * mult ** step.
+    """
+    if stake_ladder is not None:
+        return round(stake_ladder[step], 2)
+    return round(args.stake * args.martingale_mult ** step, 2)
+
+
 async def _run(args, token: str, signals_csv: str, trades_csv: str,
-               state_file: str) -> None:
+               state_file: str, stake_ladder: list[float] | None) -> None:
     cfg = yaml.safe_load(open("config.yaml", encoding="utf-8"))
     app_id = args.app_id if args.app_id else cfg["app_id"]
     limits = Limits(stake=args.stake, max_daily_loss=args.max_daily_loss,
@@ -256,9 +290,11 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
             f"{args.duration}s Rise/Fall, stake {args.stake:.2f}"
             + ("  [DRY RUN]" if args.dry_run else ""))
         if args.martingale_steps > 0:
-            ladder = [args.stake * args.martingale_mult ** i
+            ladder = [stake_for_step(args, stake_ladder, i)
                       for i in range(args.martingale_steps)]
-            log(f"   martingale: {args.martingale_steps} steps x{args.martingale_mult} "
+            kind = "custom stake ladder" if stake_ladder is not None else \
+                f"martingale x{args.martingale_mult}"
+            log(f"   {kind}: {args.martingale_steps} steps "
                 f"-> {', '.join(f'{s:.2f}' for s in ladder)} "
                 f"(max ladder loss ${sum(ladder):.2f})")
         for ln in live:
@@ -278,10 +314,9 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
         call_streak = saved.get("call_streak", 0)
         put_streak = saved.get("put_streak", 0)
         ladder_step = saved.get("ladder_step", 0)
-        current_stake = (
-            round(args.stake * args.martingale_mult ** ladder_step, 2)
-            if ladder_step else args.stake
-        )
+        if args.martingale_steps > 0:
+            ladder_step = min(ladder_step, args.martingale_steps - 1)
+        current_stake = stake_for_step(args, stake_ladder, ladder_step)
 
         # Per-level win/loss track record, restored by name so a level that
         # was already losing before a restart does not get a clean slate.
@@ -584,8 +619,8 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
                                     ladder_step = 0
                                     current_stake = args.stake
                                 else:
-                                    current_stake = round(
-                                        args.stake * args.martingale_mult ** ladder_step, 2)
+                                    current_stake = stake_for_step(
+                                        args, stake_ladder, ladder_step)
                                     log(f"   loss -> ladder step {ladder_step+1}, "
                                         f"next stake ${current_stake:.2f}")
                             elif profit > 0:
