@@ -37,3 +37,27 @@ sr_trades.csv
 lines.json.keep
 sr_bot.log
 sr_bot.err
+
+# Second account's credentials - same rule as .env, never committed
+.env.ac2
+.env.*
+!.env.example
+
+# Per-account runtime artefacts (regenerated; some are large)
+ac2_lines.json
+ac2_signals.csv
+ac2_sr_trades.csv
+ac2_sr_bot_state.json
+*_sr_bot_state.json
+sr_bot_state.json
+signals.csv
+sr_trades.csv
+*.lock
+*.bak
+*.log
+*.err
+
+# Research data: 1.9MB and rebuilt by `python -m tools.xcorr collect`
+xcorr_ticks.json
+xcorr_ticks.json.tmp
+sr_cache/

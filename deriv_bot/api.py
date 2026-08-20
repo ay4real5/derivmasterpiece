@@ -24,11 +24,36 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import ssl
 import urllib.error
 import urllib.request
 from typing import Any, AsyncIterator
 
 import websockets
+
+# Verify TLS with the OPERATING SYSTEM's trust logic, not OpenSSL's.
+#
+# Why this exists: on a network with a TLS-inspecting proxy (corporate
+# laptops), OpenSSL 3.x rejects the proxy's CA with "Basic Constraints of CA
+# cert not marked critical" - a strictness OpenSSL applies and Windows
+# Schannel does not. Measured on this machine: Windows-native TLS reached
+# api.derivws.com 5/5 while Python failed intermittently, because the host
+# resolves to two Cloudflare IPs and only one path was being intercepted -
+# so every connection was a coin flip and the bot died at startup at random.
+#
+# truststore delegates verification to the OS (Schannel on Windows, Security
+# framework on macOS, OpenSSL's own store elsewhere). This is NOT a bypass:
+# certificates are still fully verified, just by the same trust engine the
+# browser on this machine already uses. Without it the only "fixes" are
+# disabling verification (unacceptable - it exposes the API token) or
+# running only on non-inspected networks.
+try:
+    import truststore
+    SSL_CONTEXT: ssl.SSLContext | None = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+except ImportError:                                       # pragma: no cover
+    # Not installed (e.g. a machine that never needed it) - fall back to
+    # stdlib defaults rather than failing to import the whole API layer.
+    SSL_CONTEXT = None
 
 PUBLIC_WS_ENDPOINT = "wss://api.derivws.com/trading/v1/options/ws/public"
 REST_BASE = "https://api.derivws.com"
@@ -57,7 +82,11 @@ class DerivAPI:
         `request_trading_ws_url`), otherwise to the public market-data
         endpoint.
         """
-        self._ws = await websockets.connect(ws_url or self.endpoint)
+        # Same OS-trust context as the REST path (see SSL_CONTEXT above) -
+        # the websocket handshake is TLS too, and with only the REST calls
+        # fixed the bot got past list_accounts and then died here instead.
+        self._ws = await websockets.connect(ws_url or self.endpoint,
+                                            ssl=SSL_CONTEXT)
         self._reader_task = asyncio.create_task(self._read_loop())
 
     async def close(self) -> None:
@@ -130,7 +159,7 @@ class DerivAPI:
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=15, context=SSL_CONTEXT) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode(errors="replace")[:300]

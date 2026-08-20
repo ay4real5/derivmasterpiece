@@ -26,12 +26,16 @@ import yaml
 from dotenv import load_dotenv
 
 from deriv_bot.api import DerivAPI
+from deriv_bot.group_ladder import (
+    GENTLE_TARGETS, GROUPS, GroupLadder, with_targets,
+)
 from pricebot.scan import scan_levels
 from pricebot.sr_lines import (
     Decision, Limits, break_even, decide, load_lines, mark_broken,
     merge_state, retire_losing_lines, trend_direction,
 )
 from tools import lockfile
+from tools.supervisor import read_day_reset
 
 SIGNALS_CSV = "signals.csv"
 TRADES_CSV = "sr_trades.csv"
@@ -69,18 +73,27 @@ def append(path: str, row: dict) -> None:
         w.writerow(row)
 
 
-def day_pnl(path: str, day: str) -> float:
+def day_pnl(path: str, day: str, since: str | None = None) -> float:
     """Today's realised PnL, rounded to cents.
 
     Rounded because an exact comparison against an accumulated float is what
     stopped the digit bot's daily cap firing at -899.9999999999989 against 900.
+
+    `since` is the day-reset marker written by `python -m tools.reset_day`:
+    only trades at or after that ISO timestamp count. The supervisor honoured
+    this already; this script did not, so a reset silently had no effect here.
+    The marker is scoped to its own UTC day by `read_day_reset`, so it cannot
+    leave the cap disabled beyond today.
     """
     if not os.path.exists(path):
         return 0.0
     total = 0.0
     with open(path, newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
-            if not (row.get("timestamp") or "").startswith(day):
+            ts = (row.get("timestamp") or "")
+            if not ts.startswith(day):
+                continue
+            if since and ts < since:
                 continue
             raw = (row.get("profit") or "").strip()
             if not raw:
@@ -160,6 +173,29 @@ async def main() -> None:
                          "exhausting the list resets to step 0. When given, "
                          "this replaces --stake, --martingale-steps and "
                          "--martingale-mult entirely.")
+    ap.add_argument("--group-system", action="store_true",
+                    help="use the 6-group target-based recovery ladder "
+                         "(deriv_bot/group_ladder.py) instead of --stake/"
+                         "--martingale-steps/--stake-ladder, which are "
+                         "ignored when this is set.")
+    ap.add_argument("--recovery-mode", choices=["target", "breakeven"],
+                    default="breakeven",
+                    help="how trades 5+ are sized. 'target' recovers the "
+                         "deficit AND delivers the group's whole profit "
+                         "target in one win - the original rule, which makes "
+                         "the Group 4-6 ladders cost more than the bankroll. "
+                         "'breakeven' (default) recovers to zero only.")
+    ap.add_argument("--on-exhaust", choices=["stop", "reset"], default="reset",
+                    help="what happens when a run loses every rung. 'stop' "
+                         "ends the bot permanently; 'reset' (default) writes "
+                         "the run off, records it, and starts the group again "
+                         "from its first rung.")
+    ap.add_argument("--group-targets", default="gentle",
+                    help="'gentle' (default, 20/30/40/50/60/70), 'original' "
+                         "(20/32/64/128/256/512), or six comma-separated "
+                         "numbers. Measured: the original escalation completes "
+                         "only 71%% of groups against gentle's 100%%, at higher "
+                         "ruin - see tools/ladder_lab.py.")
     ap.add_argument("--dry-run", action="store_true",
                     help="decide and log, never place an order")
     ap.add_argument("--no-confirm", action="store_true",
@@ -170,9 +206,20 @@ async def main() -> None:
                     default="both",
                     help="restrict trading to one direction. 'call' = only "
                          "buy support bounces (RISE), 'put' = only sell "
-                         "resistance rejections (FALL). R_50 PUTs had 12% "
-                         "win rate across 8 trades - use 'call' to disable "
-                         "PUTs entirely.")
+                         "resistance rejections (FALL). Account 1 runs 'call' "
+                         "and account 2 runs 'both' as a deliberate A/B test - "
+                         "NOT because PUTs are worse. Measured over 207 real "
+                         "settled trades: CALL 51.5%% (n=130), PUT 44.2%% "
+                         "(n=77), a 7.4pp gap against a 7.2pp standard error "
+                         "(z=1.03, not significant), and both 95%% intervals "
+                         "contain the 51.99%% break-even. PUT's -2,300 net is "
+                         "an artefact of stake size: -2,253 of it came from 6 "
+                         "deep recovery rungs that happened to be PUTs; the "
+                         "other 71 PUTs netted -47. An earlier version of this "
+                         "text claimed '12%% win rate across 8 trades' - that "
+                         "was noise, and it is why this note now carries its "
+                         "sample sizes. Judge by win rate per direction at a "
+                         "few hundred trades per arm, not by net.")
     ap.add_argument("--require-trend", action="store_true",
                     help="only trade WITH the 15m trend: CALLs only in "
                          "uptrend/flat, PUTs only in downtrend/flat. This "
@@ -212,6 +259,8 @@ async def main() -> None:
     args = ap.parse_args()
 
     stake_ladder: list[float] | None = None
+    if args.group_system and args.stake_ladder.strip():
+        sys.exit("--group-system replaces --stake-ladder entirely - pass one or the other, not both.")
     if args.stake_ladder.strip():
         try:
             stake_ladder = [float(x) for x in args.stake_ladder.split(",") if x.strip()]
@@ -278,10 +327,26 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
         sys.exit(f"No active lines in {args.lines}. Add your levels and set "
                  f"active:true - the bot has nothing to watch otherwise.")
 
+    # Startup retry: this network intermittently fails the TLS handshake
+    # (corporate TLS-inspecting proxy, not a Deriv or token problem - seen
+    # failing and succeeding back to back with no other change). Unlike a
+    # drop mid-session, a failure here happened before the reconnect loop
+    # below even exists, so without a retry a single bad handshake kills the
+    # whole scheduled-task run instead of just costing a few seconds.
     api = DerivAPI(app_id)
-    acct = next(a for a in await api.list_accounts(token)
-                if a.get("account_type") == "demo")
-    await api.connect(await api.request_trading_ws_url(token, acct["account_id"]))
+    STARTUP_ATTEMPTS = 12
+    for startup_attempt in range(1, STARTUP_ATTEMPTS + 1):
+        try:
+            acct = next(a for a in await api.list_accounts(token)
+                        if a.get("account_type") == "demo")
+            await api.connect(await api.request_trading_ws_url(token, acct["account_id"]))
+            break
+        except Exception as exc:                          # noqa: BLE001
+            log(f"startup connect failed ({type(exc).__name__}) "
+                f"[{startup_attempt}/{STARTUP_ATTEMPTS}]")
+            if startup_attempt == STARTUP_ATTEMPTS:
+                raise
+            await asyncio.sleep(min(30, 5 * startup_attempt))
 
     try:
         bal = float((await api.balance())["balance"]["balance"])
@@ -289,7 +354,9 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
         log(f"watching {len(live)} line(s) on {args.symbol}, "
             f"{args.duration}s Rise/Fall, stake {args.stake:.2f}"
             + ("  [DRY RUN]" if args.dry_run else ""))
-        if args.martingale_steps > 0:
+        if args.group_system:
+            log("   6-group target-based recovery ladder (deriv_bot/group_ladder.py)")
+        elif args.martingale_steps > 0:
             ladder = [stake_for_step(args, stake_ladder, i)
                       for i in range(args.martingale_steps)]
             kind = "custom stake ladder" if stake_ladder is not None else \
@@ -314,9 +381,26 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
         call_streak = saved.get("call_streak", 0)
         put_streak = saved.get("put_streak", 0)
         ladder_step = saved.get("ladder_step", 0)
-        if args.martingale_steps > 0:
-            ladder_step = min(ladder_step, args.martingale_steps - 1)
-        current_stake = stake_for_step(args, stake_ladder, ladder_step)
+        group_ladder: GroupLadder | None = None
+        if args.group_system:
+            spec = (args.group_targets or "gentle").strip().lower()
+            if spec == "gentle":
+                groups = with_targets(GENTLE_TARGETS)
+            elif spec == "original":
+                groups = GROUPS
+            else:
+                groups = with_targets([float(x) for x in spec.split(",")])
+            group_ladder = GroupLadder.from_dict(
+                saved.get("group_ladder"), groups=groups,
+                recovery_mode=args.recovery_mode, on_exhaust=args.on_exhaust)
+            log(f"   recovery={args.recovery_mode} on_exhaust={args.on_exhaust} "
+                f"targets={[int(g.profit_target) for g in groups]}")
+            log(f"   {group_ladder.status_line()}")
+            current_stake = args.stake   # placeholder; recomputed each cycle below
+        else:
+            if args.martingale_steps > 0:
+                ladder_step = min(ladder_step, args.martingale_steps - 1)
+            current_stake = stake_for_step(args, stake_ladder, ladder_step)
 
         # Per-level win/loss track record, restored by name so a level that
         # was already losing before a restart does not get a clean slate.
@@ -329,6 +413,10 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
         # Rescan bookkeeping: how long has price been outside every active
         # line's zone? Reset the clock whenever price is inside one.
         outside_zone_since: float | None = None
+        # Monotonic stamp of the last actual FILL, for the stale-
+        # levels backstop above. Starts at launch so a bot that
+        # never fills still rescans on schedule.
+        last_fill_cycle = time.monotonic()
 
         while time.monotonic() < deadline:
             cycle = time.monotonic()
@@ -391,6 +479,20 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
             else:
                 fails = 0
                 reconnect_fails = 0
+                if group_ladder is not None and not group_ladder.exhausted:
+                    current_stake = group_ladder.next_stake(payout)
+
+            if group_ladder is not None and group_ladder.exhausted:
+                log("   GROUP LADDER EXHAUSTED - a run lost all "
+                    f"{group_ladder.state.trade_number} trades without "
+                    "recovering. Stopping rather than continuing "
+                    "unrecovered - see deriv_bot/group_ladder.py.")
+                save_state(state_file, {
+                    "call_streak": call_streak, "put_streak": put_streak,
+                    "ladder_step": ladder_step, "line_stats": line_stats,
+                    "group_ladder": group_ladder.to_dict(),
+                })
+                return
 
             for ln in mark_broken(active, price):
                 log(f"LINE BROKEN: {ln.name} - price {price:.4f} closed through "
@@ -417,18 +519,53 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
                 for ln in active:
                     ln.tolerance_pct = max(ln.tolerance_pct, atr_pct * 1.5)
 
+            # Computed here rather than just before decide(): the rescan
+            # block below needs it to tell a tradeable zone from one the
+            # trend filter has closed off.
+            trend = trend_direction(candles_15m)
+
             # Rescan tracking: has price left every active line's zone for
             # too long? A level drawn when price sat elsewhere just burns
             # cycles once price has moved on.
-            in_any_zone = any(ln.contains(price) for ln in active if not ln.broken)
-            if in_any_zone:
+            #
+            # ONLY zones this bot could actually act on count as "in a zone".
+            # Sitting inside a resistance zone while --direction call forbids
+            # PUTs (or the trend filter does) is functionally the same as
+            # being nowhere near a level - but it used to reset the clock, so
+            # the rescan never fired and the bot idled indefinitely. Observed
+            # live twice: price parked between S1 and R1, 0.05-0.12pp outside
+            # both, dipping into untradeable R1 often enough to keep resetting
+            # the timer. Over an hour without a trade on either account.
+            def _actionable(ln) -> bool:
+                if ln.broken or not ln.contains(price):
+                    return False
+                want = 1 if ln.type == "support" else -1
+                if args.direction == "call" and want < 0:
+                    return False
+                if args.direction == "put" and want > 0:
+                    return False
+                if args.require_trend and trend and want != trend:
+                    return False
+                return True
+
+            in_any_zone = any(_actionable(ln) for ln in active)
+            # Backstop: even a tradeable zone can go quiet (cooldown, no wick,
+            # repeated skips). If nothing has actually FILLED for twice the
+            # rescan window, the level set is stale regardless of where price
+            # sits, so force a rescan anyway.
+            stale = (args.rescan_minutes > 0
+                     and cycle - last_fill_cycle >= args.rescan_minutes * 120)
+            if in_any_zone and not stale:
                 outside_zone_since = None
             elif outside_zone_since is None:
                 outside_zone_since = cycle
             elif (args.rescan_minutes > 0
                   and cycle - outside_zone_since >= args.rescan_minutes * 60):
-                log(f"price {price:.4f} has been outside every zone for "
-                    f"{args.rescan_minutes:.1f}+ min - rescanning {args.symbol}")
+                why = (f"no fill in {(cycle - last_fill_cycle) / 60:.0f} min"
+                       if stale else
+                       f"outside every tradeable zone for "
+                       f"{args.rescan_minutes:.1f}+ min")
+                log(f"price {price:.4f} - {why} - rescanning {args.symbol}")
                 try:
                     fresh = await scan_levels(api, args.symbol)
                     if fresh:
@@ -438,21 +575,35 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
                         active = [ln for ln in lines if ln.active]
                         for ln in active:
                             ln.first_seen_epoch = int(time.time())
+                        # Wipe the per-level record. line_stats is keyed by
+                        # NAME, and a rescan reuses S1..S6/R1..R6 for entirely
+                        # different prices - so without this the fresh levels
+                        # inherit the losing record of unrelated old ones and
+                        # --retire-after-losses kills them on sight. Observed
+                        # live: a rescan put S1 0.38% from spot, and it was
+                        # retired the same second on a 4L/2W record belonging
+                        # to a level 2% away that no longer exists.
+                        line_stats.clear()
+                        for ln in lines:
+                            ln.wins = ln.losses = 0
                         log(f"RESCAN: wrote {len(fresh)} fresh level(s) to "
-                            f"{args.lines}")
+                            f"{args.lines}, cleared stale per-level records")
                     else:
                         log("RESCAN: no levels found, keeping the old set")
                 except Exception as exc:                      # noqa: BLE001
                     log(f"RESCAN failed ({type(exc).__name__}: {exc}), "
                         f"keeping the old set")
                 outside_zone_since = None
+                last_fill_cycle = time.monotonic()
 
-            pnl = day_pnl(trades_csv, day)
+            # Re-read every cycle, not once at startup: a reset issued while
+            # the bot is running must take effect without a restart, and the
+            # marker self-expires at the UTC rollover.
+            pnl = day_pnl(trades_csv, day, since=read_day_reset())
             if args.target_profit > 0 and pnl >= args.target_profit:
                 log(f"daily profit target reached ({pnl:+.2f} >= "
                     f"{args.target_profit:+.2f}) - stopping for today")
                 break
-            trend = trend_direction(candles_15m)
             d = decide(price, active, candles, int(time.time()), limits,
                        open_trades=open_trades, day_pnl=pnl, payout=payout,
                        trend=trend, confirm=not args.no_confirm,
@@ -529,6 +680,7 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
                         cid = bought["buy"]["contract_id"]
                         open_trades += 1
                         taken += 1
+                        last_fill_cycle = time.monotonic()
                         d.line.last_trade_epoch = int(time.time())
                         d.line.trades_today += 1
                         log(f"   BOUGHT {ctype} {cid} stake {current_stake:.2f} "
@@ -609,7 +761,19 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
                         # the full ladder (7 steps at $5 base / 2x = $635) or
                         # the daily cap fires mid-ladder, which is worse than
                         # either finishing the run or never starting it.
-                        if args.martingale_steps > 0:
+                        if group_ladder is not None:
+                            ginfo = group_ladder.record_result(current_stake, profit)
+                            note = ""
+                            if ginfo.get("reached_target"):
+                                note = ("  -> TARGET REACHED, advanced to group "
+                                        f"{ginfo.get('advanced_to_group')}")
+                            elif ginfo.get("abandoned"):
+                                note = (f"  -> RUN ABANDONED after "
+                                        f"{group_ladder.max_trades_per_run} losses, "
+                                        f"wrote off {ginfo['written_off']:.2f} "
+                                        f"and reset to rung 1")
+                            log(f"   {group_ladder.status_line()}{note}")
+                        elif args.martingale_steps > 0:
                             if profit < 0:
                                 ladder_step += 1
                                 if ladder_step >= args.martingale_steps:
@@ -656,6 +820,7 @@ async def _run(args, token: str, signals_csv: str, trades_csv: str,
                             "put_streak": put_streak,
                             "ladder_step": ladder_step,
                             "line_stats": line_stats,
+                            "group_ladder": group_ladder.to_dict() if group_ladder else None,
                         })
                     except Exception as exc:              # noqa: BLE001
                         open_trades = max(0, open_trades - 1)

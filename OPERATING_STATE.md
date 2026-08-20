@@ -1,5 +1,119 @@
 # What is running, and why
 
+> **UPDATED 2026-08-20 (this machine, `deriv-digit-bot`).** Everything below the
+> "SUPERSEDED" marker describes the NOTOUCH/digit era and is kept for its
+> measurements and bug history. **It is no longer what runs.**
+
+## Currently running: the S/R Rise/Fall bot, two demo accounts
+
+Two Windows Scheduled Tasks, installed by `tools/install_sr_task.ps1`:
+
+| task | account | direction | log | journal |
+|---|---|---|---|---|
+| `DerivSRBotAccount1` | `.env` (DOT93163621) | `call` only | `sr_bot.log` | `sr_trades.csv` |
+| `DerivSRBotAccount2` | `.env.ac2` (DOT94081509) | `both` | `sr_bot_ac2.log` | `ac2_sr_trades.csv` |
+
+Both run `run_sr_bot.py` on **R_50 only**, 55-second Rise/Fall, with:
+
+    --group-system --recovery-mode breakeven --on-exhaust reset
+    --group-targets gentle --max-daily-loss 5000 --target-profit 3000
+    --poll 10 --cooldown 60 --rescan-minutes 5 --retire-after-losses 2
+    --no-confirm --require-wick --adaptive-tolerance --max-per-line 50
+
+AC1 vs AC2 is a deliberate **A/B test on direction** - do not make them
+identical without discarding it. Over 207 settled trades: CALL 51.5% (n=130)
+vs PUT 44.2% (n=77), a 7.4pp gap against a 7.2pp standard error (**z=1.03, not
+significant**), both 95% intervals containing the 51.99% break-even. PUT's
+-2,300 net was a stake-size artefact: -2,253 of it from six deep recovery
+rungs. Resolving this needs ~700 trades per arm.
+
+### The 6-group recovery ladder (`deriv_bot/group_ladder.py`)
+
+Six groups traded one at a time, 1->2->...->6->1. Four fixed base stakes, then
+computed recovery rungs, capped at 10 rungs per run.
+
+**`--recovery-mode breakeven` is the important setting.** The original rule
+sized recovery to clear the deficit AND deliver the group's whole profit target
+in one win. Because targets dwarfed the small base stakes, rung 5 jumped 6-20x
+off rung 4 and the Group 4-6 ladders cost **13k/24k/46k against a 10k bankroll
+- they could never complete**. Break-even recovery (restore to zero only)
+brings them to 2.9k/3.9k/4.9k. Live proof: Account 2 sat at Group 5 rung 8
+needing a **2,907 stake**; under the new rule the same position stakes **4**.
+
+`--group-targets gentle` (20/30/40/50/60/70) replaced 20/32/64/128/256/512.
+P(a run wipes out) is roughly target/(target+bankroll), so escalating targets
+escalated ruin ~25x from Group 1 to Group 6. Simulated over 1,500 sixty-day
+careers (`python -m tools.ladder_lab`): gentle completes **100% of groups at
+8.4% ruin** against the escalation's **71% at 10.7%** - strictly better.
+
+`--on-exhaust reset` writes off a run that loses every rung and restarts the
+group instead of stopping the bot forever. Median career: 13 days -> 60.
+
+### Trade rate: maximise it while on DEMO
+
+Bleed scales linearly with volume (~0.73 per trade), and that fact was briefly
+used to justify throttling. **That was the wrong objective** - on demo the money
+is not real and DATA is the only output. Measured rates before the throttle:
+AC1 127/day, AC2 223/day; halving them pushed the CALL-vs-PUT answer from ~5
+days to ~10. Reverted. Throttle only when real money is in play.
+
+### Live results under this design
+
+768 trades all-time across both accounts, **50.26% win rate, 95% CI
+[46.72%, 53.80%]**. Break-even is 51.99%, a coin flip is 50% - **the interval
+contains both**, so after 768 trades the S/R levels remain indistinguishable
+from random. Return on turnover: -9.47% overall.
+
+### Bugs found live during the 2026-08-19/20 session
+
+Every one silent, none visible in the P&L:
+
+| bug | symptom |
+|---|---|
+| `tools/reset_day.py` never wired into `run_sr_bot.py` | it wrote the `.day_reset` marker; this script never read it, so every daily-loss reset silently did nothing |
+| `line_stats` keyed by NAME, reused across rescans | a rescan reuses S1..S6/R1..R6 for different prices, so fresh levels inherited dead levels' losing records and `--retire-after-losses` killed them on sight - observed retiring the best level (0.38% from spot) the same second it was created |
+| rescan clock reset by UNTRADEABLE zones | price parked between S1 and R1, dipping into a resistance zone the bot could never trade (CALL-only / trend filter), resetting the timer forever. Both accounts idled over an hour. Fixed: only zones this bot can act on count |
+| both accounts shared one `lines.json` | with `--rescan-minutes` on both, either could overwrite the set the other was mid-trade on. Now `--lines` per account |
+| lowering targets silently voided the group structure | every group's carried `cumulative_profit` already exceeded its new gentle target, so each win merely rotated groups. Counters reset so live state matches what `ladder_lab` models |
+| `--help` crashed | a bare `%` in `--direction` help text; argparse formats that string. Escaped to `%%` |
+| TLS handshake failures killed startup | corporate TLS-inspecting proxy. `deriv_bot/api.py` now uses an OS-trust SSL context on BOTH REST and websocket paths - fixing only REST let it pass `list_accounts` then die on `connect` |
+
+### Research tooling added
+
+- **`tools/ladder_lab.py`** - Monte Carlo that drives `GroupLadder` (and any
+  `Staker`) with real payouts, bankroll, daily cap and target stops. The old
+  `tools/martingale_sim.py` hardcodes 2x doubling and cannot simulate the group
+  ladder. Note: the comparison numbers in `deriv_bot/staking.py`'s docstrings
+  were produced by code **not in this repo** and are not reproducible.
+- **`tools/xcorr.py`** - tests whether Deriv's synthetic feeds are independent
+  of *each other*. Every prior test here examined one symbol alone. If two feeds
+  share entropy, one symbol's tick predicts another's - real prediction, which
+  unlike staking survives the margin. First run (n~999) found nothing above a
+  Bonferroni threshold, **but could only see |r|>0.089 while |r|>0.063 is
+  already profitable** - a real blind spot. `collect` accumulates ticks to close
+  it. `tests/test_xcorr.py` plants a known r~0.15 and requires the estimator to
+  find it, so a negative result means something.
+
+### Known-unfixed
+
+- **Daily cap overshoots.** A 1,300 cap stopped at **-2,238** (72% past) because
+  a stake is never compared to remaining headroom before being placed. More
+  dangerous now at `--max-daily-loss 5000`.
+- **`GroupLadder` has no `budget_left` interaction** - it can name a stake
+  larger than the day's remaining allowance and nothing refuses it.
+  `deriv_bot/staking.py::fit_or_refuse` is the primitive to route through.
+- **Cap resets at UTC midnight mid-run**, so a run spanning midnight gets a
+  fresh allowance.
+- **Two hardcoded API tokens** in `check_accounts.py` and `check_profit_table.py`
+  are committed to a PUBLIC GitHub repo and are live. Revoke and move to env.
+- **Scheduled tasks register Interactive, not S4U** (needs elevated PowerShell),
+  so they do not survive logoff.
+
+---
+
+# SUPERSEDED - the NOTOUCH/digit era below
+
+
 Snapshot of the live configuration and the measurements behind it.
 `config.yaml` is gitignored (the digit bot's per-machine config);
 `config.notouch.yaml` is committed since it holds no secrets, but the
