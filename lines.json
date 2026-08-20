@@ -2,16 +2,16 @@
   {
     "name": "S1",
     "symbol": "R_50",
-    "price_level": 101.3454,
+    "price_level": 102.2972,
     "type": "support",
-    "timeframe": "1m",
+    "timeframe": "5m",
     "tolerance_pct": 0.35,
     "active": true
   },
   {
     "name": "S2",
     "symbol": "R_50",
-    "price_level": 100.733,
+    "price_level": 102.2972,
     "type": "support",
     "timeframe": "3m",
     "tolerance_pct": 0.35,
@@ -20,52 +20,52 @@
   {
     "name": "S3",
     "symbol": "R_50",
-    "price_level": 100.6924,
+    "price_level": 101.6426,
     "type": "support",
-    "timeframe": "10m",
+    "timeframe": "1m",
     "tolerance_pct": 0.35,
     "active": true
   },
   {
     "name": "S4",
     "symbol": "R_50",
-    "price_level": 100.6574,
+    "price_level": 101.3756,
     "type": "support",
-    "timeframe": "5m",
+    "timeframe": "3m",
     "tolerance_pct": 0.35,
     "active": true
   },
   {
     "name": "S5",
     "symbol": "R_50",
-    "price_level": 99.9432,
+    "price_level": 101.2701,
     "type": "support",
-    "timeframe": "10m",
+    "timeframe": "5m",
     "tolerance_pct": 0.35,
     "active": true
   },
   {
     "name": "S6",
     "symbol": "R_50",
-    "price_level": 99.9366,
+    "price_level": 101.244,
     "type": "support",
-    "timeframe": "5m",
+    "timeframe": "10m",
     "tolerance_pct": 0.35,
     "active": true
   },
   {
     "name": "R1",
     "symbol": "R_50",
-    "price_level": 101.4657,
+    "price_level": 102.7692,
     "type": "resistance",
-    "timeframe": "5m",
+    "timeframe": "3m",
     "tolerance_pct": 0.35,
     "active": true
   },
   {
     "name": "R2",
     "symbol": "R_50",
-    "price_level": 101.7221,
+    "price_level": 102.758,
     "type": "resistance",
     "timeframe": "10m",
     "tolerance_pct": 0.35,
@@ -74,36 +74,9 @@
   {
     "name": "R3",
     "symbol": "R_50",
-    "price_level": 101.8247,
-    "type": "resistance",
-    "timeframe": "1m",
-    "tolerance_pct": 0.35,
-    "active": true
-  },
-  {
-    "name": "R4",
-    "symbol": "R_50",
-    "price_level": 102.1784,
+    "price_level": 102.7917,
     "type": "resistance",
     "timeframe": "5m",
-    "tolerance_pct": 0.35,
-    "active": true
-  },
-  {
-    "name": "R5",
-    "symbol": "R_50",
-    "price_level": 102.1878,
-    "type": "resistance",
-    "timeframe": "10m",
-    "tolerance_pct": 0.35,
-    "active": true
-  },
-  {
-    "name": "R6",
-    "symbol": "R_50",
-    "price_level": 102.9024,
-    "type": "resistance",
-    "timeframe": "3m",
     "tolerance_pct": 0.35,
     "active": true
   }
