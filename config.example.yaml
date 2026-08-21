@@ -4,7 +4,11 @@
 # Your app's ID from https://developers.deriv.com/dashboard > Registered apps.
 # Deriv retired the old numeric app_ids (e.g. 1089) along with the Legacy API;
 # current app IDs are alphanumeric strings. Create a "Native apps (PAT)" app.
-app_id: your-app-id-here
+# The app ids already registered for this project. An app_id is a PUBLIC
+# client identifier, not a secret - the PAT in .env is the secret. Account 1
+# uses this one; account 2 overrides it with --app-id 343GsiWjpyIskHP1nbTzi
+# (see tools/install_sr_task.ps1).
+app_id: 33ULSRYkmDK8Y515CmE1l
 symbol: R_100        # Volatility 100 Index — a common Digits-trading symbol
 stake: 1.00
 currency: USD

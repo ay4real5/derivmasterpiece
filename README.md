@@ -9,6 +9,12 @@ an explicit, separate step you take on purpose.
 
 Four bots and two research reports. All on demo.
 
+>**STALE AS OF 2026-08-20.** The table and status claims below describe the
+> NOTOUCH/digit era. What actually runs now is the **S/R Rise/Fall bot**
+> (`run_sr_bot.py`) on two demo accounts. See `CLAUDE.md` and the top of
+> `OPERATING_STATE.md`. The measurements and reasoning below are still good;
+> only the "what is running" claims are wrong.
+
 **The NOTOUCH bot is the only one running**, via `tools/risefall_supervisor.py`
 (generic despite the name - it takes `--config`/`--journal`/`--log`, so it
 supervises whichever of these it's pointed at). It **replaced the digit bot**,
