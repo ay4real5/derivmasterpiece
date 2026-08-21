@@ -88,10 +88,12 @@ Every one silent, none visible in the P&L:
 - **`tools/xcorr.py`** - tests whether Deriv's synthetic feeds are independent
   of *each other*. Every prior test here examined one symbol alone. If two feeds
   share entropy, one symbol's tick predicts another's - real prediction, which
-  unlike staking survives the margin. First run (n~999) found nothing above a
-  Bonferroni threshold, **but could only see |r|>0.089 while |r|>0.063 is
-  already profitable** - a real blind spot. `collect` accumulates ticks to close
-  it. `tests/test_xcorr.py` plants a known r~0.15 and requires the estimator to
+  unlike staking survives the margin. **SETTLED 2026-08-21: the feeds are
+  independent.** The first run (n~999) found nothing but could only see
+  |r|>0.089 while |r|>0.063 is already profitable - a real blind spot. After
+  accumulating to n=14,943-29,890 the blind spot closed (detectable |r|=0.0281
+  vs profitable 0.0626) and the answer held: largest |z| 2.21 against a 3.434
+  Bonferroni threshold across 28 pairs x 3 lags. A properly powered negative. `tests/test_xcorr.py` plants a known r~0.15 and requires the estimator to
   find it, so a negative result means something.
 
 ### Known-unfixed

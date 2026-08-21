@@ -1,13 +1,24 @@
 # CLAUDE.md — deriv-digit-bot
 
+> **⛔ TRADING IS STOPPED ON THE ORIGINAL MACHINE (as of 2026-08-21).**
+> Both scheduled tasks were **uninstalled** (not merely stopped) and all
+> processes killed, deliberately, so that trading can run from ONE machine
+> only. Running these bots against the same Deriv accounts from two machines
+> at once is a known, recorded failure: each machine's journal sees only its
+> own trades, so the daily-loss cap loses track of most of them. If you are
+> reading this on the second machine, you are clear to install and run.
+> Re-install with `.\tools\install_sr_task.ps1 -Start`.
+
 > Auto-loaded every session. Read this first, then `OPERATING_STATE.md`.
 > **`README.md` is stale** — it still claims the NOTOUCH bot is running. It is
 > not. `OPERATING_STATE.md`'s top section is the current truth.
 
-## What actually runs right now
+## The intended configuration
 
-**The S/R Rise/Fall bot, `run_sr_bot.py`, on two demo accounts**, as two Windows
-Scheduled Tasks installed by `tools/install_sr_task.ps1`:
+This is what to run — **currently installed on NEITHER machine** (see the
+shutdown banner above; install it on exactly one). The S/R Rise/Fall bot,
+`run_sr_bot.py`, on two demo accounts, as two Windows Scheduled Tasks
+registered by `tools/install_sr_task.ps1`:
 
 | task | env file | direction | log | journal | state |
 |---|---|---|---|---|---|
@@ -15,8 +26,8 @@ Scheduled Tasks installed by `tools/install_sr_task.ps1`:
 | `DerivSRBotAccount2` | `.env.ac2` | `both` | `sr_bot_ac2.log` | `ac2_sr_trades.csv` | `ac2_sr_bot_state.json` |
 
 Both trade **R_50 only**, 55-second Rise/Fall, using the 6-group recovery ladder
-in `deriv_bot/group_ladder.py`. The NOTOUCH and digit bots are **stopped** —
-their tasks are not registered.
+in `deriv_bot/group_ladder.py`. The NOTOUCH and digit bots are retired — their
+tasks are not registered and should not be revived.
 
 ## Setting this repo up on a new machine
 
@@ -76,9 +87,14 @@ margin predicts, which is favourable variance, not the strategy working.
 If asked to improve profitability, the only two real levers are **margin**
 (Rise/Fall 3.83–3.99% vs Touch/NoTouch 2.26–2.55% at 5m–2h) and **trade count**.
 Neither creates an edge. Deriv synthetics are the house's own RNG priced by a
-single dealer — `python -m tools.xcorr` and the complementary-pair trick in
-`deriv_bot/touch_edge.py` both confirm no arbitrage exists (every pair sums to
-102.4–104.0%, never under 100%). Real edges, if wanted, need a market with more
+single dealer. Two independent checks confirm there is nothing to arbitrage:
+the complementary-pair trick in `deriv_bot/touch_edge.py` (every pair sums to
+102.4–104.0%, never under 100%), and **`tools/xcorr.py`, now settled** — across
+28 symbol pairs x 3 lags at n=14,943–29,890, the largest |z| was 2.21 against a
+Bonferroni threshold of 3.434. Crucially the test had **no blind spot** at that
+sample size (detectable |r|=0.0281 vs profitable |r|=0.0626), so this is a
+real negative, not an underpowered one. **The feeds are independent. Do not
+re-run this hoping for a different answer.** Real edges, if wanted, need a market with more
 than one price-setter; the same API already reaches 25 forex, 11 index, 4
 commodity and 2 crypto symbols.
 
